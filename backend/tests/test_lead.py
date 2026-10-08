@@ -1,5 +1,6 @@
 from app.lead import build_lead, draft_email
 from app.models import (
+    ChatMessage,
     ContactInfo,
     Hazard,
     LLMAnalysis,
@@ -51,11 +52,20 @@ def _session(**kwargs) -> SessionState:
     return SessionState(**data)
 
 
-def test_complete_lead_and_email_draft():
-    lead = build_lead(_session())
+def test_complete_lead_and_email_draft(monkeypatch):
+    monkeypatch.setattr("app.llm._client", lambda **_k: None)
+    session = _session(
+        messages=[
+            ChatMessage(
+                role="user",
+                content="Kitchen sink leaking onto the floor.",
+            )
+        ]
+    )
+    lead = build_lead(session)
     assert lead.status == LeadStatus.complete
     assert lead.missing_required == []
-    email = draft_email(lead)
+    email = draft_email(lead, messages=session.messages)
     assert email is not None
     assert "kitchen sink leaking" in email.body.lower()
     assert "Austin" in email.subject or "78704" in email.subject
@@ -95,7 +105,115 @@ def _electrician() -> Provider:
     )
 
 
-def test_email_does_not_dump_chat_or_form_fields():
+def test_email_includes_chat_details_not_generic_technician(monkeypatch):
+    """Chat specifics must appear. A canned technician line is not enough."""
+    monkeypatch.setattr("app.llm._client", lambda **_k: None)
+    messages = [
+        ChatMessage(
+            role="user",
+            content="something's off with the water, idk, the house just feels wrong",
+        ),
+        ChatMessage(
+            role="assistant",
+            content="What are you noticing with the water — color, smell, or which fixtures?",
+        ),
+        ChatMessage(
+            role="user",
+            content="The color is murky, the smell is very foul. Temperature is hot.",
+        ),
+        ChatMessage(
+            role="assistant",
+            content="Is this happening at every tap, or only on the hot-water side?",
+        ),
+        ChatMessage(role="user", content="I'm not sure"),
+    ]
+    lead = build_lead(
+        _session(
+            messages=messages,
+            analysis=LLMAnalysis(
+                service_category=ServiceCategory.plumbing,
+                category_confidence=0.9,
+                urgency=Urgency.same_day,
+                urgency_reason="Water quality issue",
+                problem_summary="something's off with the water, idk",
+                facts={
+                    "color": "murky",
+                    "smell": "foul",
+                    "temperature": "hot",
+                    "scope": "unknown",
+                },
+                zip_code="78717",
+            ),
+            city=None,
+            zip_code="78717",
+        )
+    )
+    email = draft_email(lead, messages=messages)
+    assert email is not None
+    lowered = email.body.lower()
+    assert "murky" in lowered
+    assert "foul" in lowered
+    assert "hot" in lowered
+    assert "i need a technician at the home" not in lowered
+    assert "What I know" not in email.body
+    assert "leak_location" not in email.body
+
+
+def test_email_llm_writes_from_transcript(monkeypatch):
+    captured = {}
+
+    def fake_draft(history, problem_summary="", facts=None):
+        captured["history"] = history
+        captured["summary"] = problem_summary
+        captured["facts"] = facts
+        return (
+            "The water is murky and has a foul smell. It is hot. "
+            "I do not know how widespread it is.",
+            False,
+        )
+
+    monkeypatch.setattr("app.llm.draft_problem_paragraph", fake_draft)
+    messages = [
+        ChatMessage(
+            role="user",
+            content="The color is murky, the smell is very foul. Temperature is hot.",
+        ),
+        ChatMessage(role="user", content="I'm not sure"),
+    ]
+    lead = build_lead(
+        _session(
+            messages=messages,
+            analysis=LLMAnalysis(
+                service_category=ServiceCategory.plumbing,
+                category_confidence=0.9,
+                urgency=Urgency.same_day,
+                problem_summary="Murky, foul-smelling hot water.",
+                facts={"color": "murky", "smell": "foul", "temperature": "hot"},
+                zip_code="78717",
+            ),
+            city=None,
+            zip_code="78717",
+        )
+    )
+    email = draft_email(lead, messages=messages)
+    assert captured["history"] == messages
+    assert "murky" in captured["summary"].lower()
+    assert captured["facts"]["color"] == "murky"
+    body = email.body
+    assert "The water is murky and has a foul smell." in body
+    assert "Hello Austin Rooter," in body
+    assert "The service address is 1200 Barton Springs Rd." in body
+    assert "I need a technician at the home" not in body
+
+
+def test_email_does_not_dump_form_field_labels(monkeypatch):
+    monkeypatch.setattr(
+        "app.llm.draft_problem_paragraph",
+        lambda *_a, **_k: (
+            "The lights went out throughout the house. I do not know what caused it.",
+            False,
+        ),
+    )
     lead = build_lead(
         _session(
             providers=[_electrician()],
@@ -122,16 +240,24 @@ def test_email_does_not_dump_chat_or_form_fields():
     body = email.body
     assert "Hello " in body
     assert "I would like to request emergency electrical service" in body
-    assert "The power is out throughout the house." in body
-    assert "I do not know what caused it." in body
+    assert "The lights went out throughout the house." in body
     assert "yes I am safe" not in body
     assert "What I know" not in body
     assert "Lights out:" not in body
     assert "Safety signs present" not in body
+    assert "lights_out" not in body
     assert "Hi " not in body
 
 
-def test_email_is_first_person_and_humanizes_facts():
+def test_email_llm_output_stays_first_person(monkeypatch):
+    monkeypatch.setattr(
+        "app.llm.draft_problem_paragraph",
+        lambda *_a, **_k: (
+            "My living room ceiling fan sparked and stopped spinning. "
+            "I shut off power at the breaker.",
+            False,
+        ),
+    )
     lead = build_lead(
         _session(
             providers=[_electrician()],
@@ -141,18 +267,12 @@ def test_email_is_first_person_and_humanizes_facts():
                 urgency=Urgency.emergency,
                 problem_summary=(
                     "Living room ceiling fan sparked and stopped spinning. "
-                    "The homeowner shut off power at the breaker, which stopped the sparking, "
-                    "but a pungent burning smell is still present right now. "
-                    "No visible smoke, scorch marks, or discoloration reported."
+                    "The homeowner shut off power at the breaker."
                 ),
                 facts={
                     "fixture": "ceiling fan",
                     "location": "living_room",
                     "room": "living room",
-                    "safe": "yes",
-                    "visible_damage": "None reported",
-                    "smell": "Persistent, pungent",
-                    "breaker": "Breaker off, sparking stopped",
                 },
                 zip_code="78717",
             ),
@@ -163,14 +283,12 @@ def test_email_is_first_person_and_humanizes_facts():
     body = draft_email(lead).body
     assert "living_room" not in body
     assert "The homeowner" not in body
-    assert "None reported" not in body
-    assert "The issue is at" not in body
     assert "I shut off" in body
-    assert "I am safe" not in body or body.count("I am safe") <= 1
-    assert body.count("It is in the living room") <= 1
+    assert "What I know" not in body
 
 
-def test_mailto_uses_provider_email():
+def test_mailto_uses_provider_email(monkeypatch):
+    monkeypatch.setattr("app.llm._client", lambda **_k: None)
     lead = build_lead(
         _session(
             providers=[

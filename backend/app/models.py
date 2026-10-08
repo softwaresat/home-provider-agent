@@ -94,6 +94,7 @@ class LLMAnalysis(BaseModel):
     hazards: list[Hazard] = Field(default_factory=list)
     missing_details: list[str] = Field(default_factory=list)
     next_question: Optional[str] = None
+    dispatch_ready: bool = False
 
     @field_validator("service_category", mode="before")
     @classmethod
@@ -144,6 +145,19 @@ class LLMAnalysis(BaseModel):
             seen.add(hazard)
             out.append(hazard)
         return out
+
+    @field_validator("dispatch_ready", mode="before")
+    @classmethod
+    def coerce_dispatch_ready(cls, value):
+        if isinstance(value, bool):
+            return value
+        if value is None or value == "":
+            return False
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            return value.strip().lower() in {"true", "1", "yes"}
+        return False
 
     @field_validator("missing_details", mode="before")
     @classmethod

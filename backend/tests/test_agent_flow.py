@@ -1,11 +1,13 @@
 from app import agent
-from app.agent import _extract_location, apply_location_string
+from app.agent import _extract_location, apply_location_string, merge_analysis
 from app.models import (
     ContactInfo,
+    Hazard,
     LeadStatus,
     LLMAnalysis,
     Provider,
     ServiceCategory,
+    SessionState,
     Stage,
     Urgency,
 )
@@ -97,6 +99,126 @@ def test_gas_smell_escalates_without_search(monkeypatch):
     assert session.safety_advice == session.messages[-1].content
 
 
+def _historical_escalate_analyze(hazard: Hazard, category: ServiceCategory):
+    """DeepSeek keeps returning the original escalate label from chat history."""
+
+    def fake_analyze(history, **_kwargs):
+        last = next(
+            (message.content.lower() for message in reversed(history) if message.role == "user"),
+            "",
+        )
+        want_search = "find contractors" in last
+        return _analysis(
+            service_category=category,
+            category_confidence=0.93,
+            hazards=[hazard],
+            problem_summary="Emergency reported earlier in the chat.",
+            facts={"hazard": hazard.value},
+            missing_details=[] if want_search else ["dispatch details"],
+            next_question=None if want_search else "What else should dispatch know?",
+            dispatch_ready=want_search,
+        ), False
+
+    return fake_analyze
+
+
+def _stub_escalate_copy(monkeypatch, modes: list[str]) -> None:
+    def fake_safety_reply(_user_text, _hazards, mode="escalate"):
+        modes.append(mode)
+        if mode == "escalate":
+            return (
+                "This is an emergency. Get out and call 911. "
+                "I will not look up contractors until you confirm everyone is safe.",
+                False,
+            )
+        if mode == "resume":
+            return (
+                "Thanks for confirming you are safe. I can continue helping you find a provider.",
+                False,
+            )
+        return ("Caution noted.", False)
+
+    monkeypatch.setattr("app.llm.safety_reply", fake_safety_reply)
+
+
+def test_gas_safe_confirmation_does_not_reloop_when_llm_repeats_hazard(monkeypatch):
+    """Escalate on gas; 'I am safe' resumes; contractors search is not a 911 hold."""
+    modes: list[str] = []
+    _stub_escalate_copy(monkeypatch, modes)
+    _stub_places(monkeypatch)
+    monkeypatch.setattr(
+        "app.llm.analyze",
+        _historical_escalate_analyze(Hazard.gas_leak, ServiceCategory.plumbing),
+    )
+
+    session = agent.create_session("gas-safe-loop")
+    agent.handle_location(session, "Austin, TX 78704")
+    agent.handle_user_message(
+        session,
+        "I smell gas in the kitchen. It started a few minutes ago.",
+    )
+    assert session.stage == Stage.safety_escalated
+    assert session.safety_cleared is False
+    escalate_copy = session.messages[-1].content
+    assert "911" in escalate_copy
+    assert "will not look up contractors until you confirm" in escalate_copy.lower()
+
+    agent.handle_user_message(session, "I am safe")
+    assert session.safety_cleared is True
+    assert session.stage != Stage.safety_escalated
+    assert agent.blocked_for_safety(session) is False
+    resumed = session.messages[-1].content
+    assert resumed != escalate_copy
+    assert "will not look up contractors until you confirm" not in resumed.lower()
+    assert "911" not in resumed
+    assert modes.count("escalate") == 1
+    assert "resume" in modes
+    assert session.providers == []
+
+    agent.handle_user_message(session, "I am safe, please find contractors")
+    assert session.safety_cleared is True
+    assert session.stage != Stage.safety_escalated
+    assert agent.blocked_for_safety(session) is False
+    assert session.stage == Stage.showing_providers
+    assert session.providers
+    last = session.messages[-1].content.lower()
+    assert "will not look up contractors until you confirm" not in last
+    assert modes.count("escalate") == 1
+
+
+def test_co_safe_confirmation_does_not_reloop_when_llm_repeats_hazard(monkeypatch):
+    """Same 911 loop for carbon monoxide — not gas-only."""
+    modes: list[str] = []
+    _stub_escalate_copy(monkeypatch, modes)
+    _stub_places(
+        monkeypatch,
+        _listing(name="Stub HVAC", primary_type="hvac_contractor"),
+    )
+    monkeypatch.setattr(
+        "app.llm.analyze",
+        _historical_escalate_analyze(Hazard.carbon_monoxide, ServiceCategory.hvac),
+    )
+
+    session = agent.create_session("co-safe-loop")
+    agent.handle_location(session, "Austin, TX 78704")
+    agent.handle_user_message(session, "Our carbon monoxide alarm is going off.")
+    assert session.stage == Stage.safety_escalated
+    assert Hazard.carbon_monoxide in session.hazards
+    assert "911" in session.messages[-1].content
+
+    agent.handle_user_message(session, "I am safe")
+    assert session.safety_cleared is True
+    assert session.stage != Stage.safety_escalated
+    assert "will not look up contractors until you confirm" not in session.messages[-1].content.lower()
+
+    agent.handle_user_message(session, "I am safe, please find contractors")
+    assert session.stage != Stage.safety_escalated
+    assert session.safety_cleared is True
+    assert session.stage == Stage.showing_providers
+    assert session.providers
+    assert modes.count("escalate") == 1
+
+
 def test_happy_path_completes_lead_with_stubbed_places(monkeypatch):
     listing = Provider(
         place_id="ChIJ-eval",
@@ -126,6 +248,7 @@ def test_happy_path_completes_lead_with_stubbed_places(monkeypatch):
         return _analysis(next_question=None, missing_details=[]), False
 
     monkeypatch.setattr("app.llm.analyze", fake_analyze)
+    monkeypatch.setattr("app.llm._client", lambda **_k: None)
 
     session = agent.create_session("sink")
     agent.handle_location(session, "Austin, TX 78704")
@@ -156,6 +279,8 @@ def test_happy_path_completes_lead_with_stubbed_places(monkeypatch):
     assert session.lead.status == LeadStatus.complete
     assert session.email is not None
     assert "Stub Plumbing" in session.email.body
+    assert "leaking" in session.email.body.lower()
+    assert "i need a technician at the home" not in session.email.body.lower()
     assert agent.effective_category(session) == ServiceCategory.plumbing
 
 
@@ -345,6 +470,7 @@ def test_completed_lead_does_not_mutate_analysis(monkeypatch):
         return _analysis(next_question=None, missing_details=[]), False
 
     monkeypatch.setattr("app.llm.analyze", fake_analyze)
+    monkeypatch.setattr("app.llm._client", lambda **_k: None)
     session = agent.create_session("lock-lead")
     agent.handle_location(session, "Austin, TX 78704")
     agent.handle_user_message(session, "My kitchen sink has been leaking under the cabinet.")
@@ -416,29 +542,368 @@ def test_analyze_gets_no_catalog_hints_for_uncovered_problem(monkeypatch):
     assert captured["guidance"] is None
 
 
-def test_nonsensical_answer_does_not_end_intake(monkeypatch):
+def test_unknown_answer_does_not_pivot_to_catalog_fallback(monkeypatch):
     _stub_places(monkeypatch)
     turns = {"n": 0}
 
     def fake_analyze(_history, **_kwargs):
         turns["n"] += 1
         if turns["n"] == 1:
-            return _analysis(next_question="Is water still leaking right now?"), False
-        return _analysis(next_question=None, missing_details=[]), False
+            return _analysis(
+                problem_summary="Something is off with the water.",
+                facts={},
+                next_question=(
+                    "What are you noticing with the water — color, smell, or which fixtures?"
+                ),
+                dispatch_ready=False,
+            ), False
+        if turns["n"] == 2:
+            return _analysis(
+                problem_summary="Murky, foul-smelling hot water.",
+                facts={
+                    "color": "murky",
+                    "smell": "foul",
+                    "temperature": "hot",
+                },
+                next_question="Is this happening at every tap, or only on the hot-water side?",
+                dispatch_ready=False,
+            ), False
+        return _analysis(
+            problem_summary="Murky, foul-smelling hot water. Scope unknown.",
+            facts={
+                "color": "murky",
+                "smell": "foul",
+                "temperature": "hot",
+                "scope": "unknown",
+            },
+            missing_details=[],
+            next_question=None,
+            dispatch_ready=True,
+        ), False
 
     monkeypatch.setattr("app.llm.analyze", fake_analyze)
-    session = agent.create_session("idk-sink")
+    session = agent.create_session("idk-water")
+    agent.handle_location(session, "Austin, TX 78704")
+    agent.handle_user_message(
+        session,
+        "something's off with the water, idk, the house just feels wrong",
+    )
+    assert session.stage == Stage.gathering
+    agent.handle_user_message(
+        session,
+        "The color is murky, the smell is very foul. Temperature is hot.",
+    )
+    assert session.stage == Stage.gathering
+    agent.handle_user_message(session, "I'm not sure")
+    last = session.messages[-1].content.lower()
+    assert "leak or clog" not in last
+    assert "still running" not in last
+    assert session.stage == Stage.showing_providers
+    assert session.providers
+    assert session.analysis.dispatch_ready is True
+    assert session.analysis.facts["scope"] == "unknown"
+    assert session.analysis.next_question is None
+    assert "murky" in session.analysis.problem_summary.lower()
+
+
+def test_merge_keeps_detailed_summary_on_shrug():
+    session = SessionState(id="shrug-merge")
+    session.analysis = _analysis(
+        problem_summary="Murky, foul-smelling hot water.",
+        facts={"color": "murky", "smell": "foul", "temperature": "hot"},
+        next_question="Is this at every tap?",
+        dispatch_ready=False,
+    )
+    merge_analysis(
+        session,
+        _analysis(
+            problem_summary="I'm not sure.",
+            facts={"scope": "unknown"},
+            next_question=None,
+            dispatch_ready=True,
+        ),
+    )
+    assert "murky" in session.analysis.problem_summary.lower()
+    assert "not sure" not in session.analysis.problem_summary.lower()
+    assert session.analysis.facts["color"] == "murky"
+    assert session.analysis.facts["scope"] == "unknown"
+    assert session.analysis.dispatch_ready is True
+
+
+def test_idk_does_not_reask_the_same_slot(monkeypatch):
+    _stub_places(monkeypatch)
+    turns = {"n": 0}
+
+    def fake_analyze(_history, **_kwargs):
+        turns["n"] += 1
+        if turns["n"] == 1:
+            return _analysis(
+                next_question="Is water still leaking right now?",
+                dispatch_ready=False,
+            ), False
+        return _analysis(
+            facts={"still_running": "unknown"},
+            missing_details=[],
+            next_question=None,
+            dispatch_ready=True,
+        ), False
+
+    monkeypatch.setattr("app.llm.analyze", fake_analyze)
+    session = agent.create_session("idk-same-slot")
     agent.handle_location(session, "Austin, TX 78704")
     agent.handle_user_message(session, "my sink is leaking")
-    assert session.stage == Stage.gathering
     first = session.messages[-1].content.lower()
+    assert "still" in first
     agent.handle_user_message(session, "idk")
+    last = session.messages[-1].content.lower()
+    assert "still leaking" not in last
+    assert "still running" not in last
+    assert session.stage == Stage.showing_providers
+    assert session.analysis.dispatch_ready is True
+    assert session.analysis.facts["still_running"] == "unknown"
+    assert session.analysis.next_question is None
+
+
+def test_vague_water_problem_becomes_actionable_after_a_few_questions(monkeypatch):
+    _stub_places(monkeypatch)
+
+    def fake_analyze(history, **_kwargs):
+        last = next(
+            (m.content.lower() for m in reversed(history) if m.role == "user"),
+            "",
+        )
+        if "every faucet" in last or "hot and cold" in last:
+            return _analysis(
+                problem_summary="Brown water at every faucet, hot and cold, started this morning.",
+                facts={
+                    "symptom": "brown discolored water",
+                    "scope": "every faucet",
+                    "started": "this morning",
+                },
+                missing_details=[],
+                next_question=None,
+                dispatch_ready=True,
+            ), False
+        if "brown" in last:
+            return _analysis(
+                problem_summary="The water is brown.",
+                facts={"symptom": "brown water"},
+                missing_details=["scope", "timing"],
+                next_question="Is it every faucet, and when did it start?",
+                dispatch_ready=False,
+            ), False
+        return _analysis(
+            problem_summary="Something is wrong with the water.",
+            facts={},
+            missing_details=["symptom", "scope"],
+            next_question="What is happening with the water?",
+            dispatch_ready=False,
+        ), False
+
+    monkeypatch.setattr("app.llm.analyze", fake_analyze)
+    session = agent.create_session("vague-water")
+    agent.handle_location(session, "Austin, TX 78704")
+    agent.handle_user_message(session, "something is wrong with the water")
+    assert session.stage == Stage.gathering
+    assert session.questions_asked == 1
+    agent.handle_user_message(session, "it's brown")
+    assert session.stage == Stage.gathering
+    agent.handle_user_message(
+        session,
+        "every faucet, hot and cold, started this morning",
+    )
+    assert session.stage == Stage.showing_providers
+    assert session.questions_asked <= 3
+    assert session.providers
+    assert "brown" in session.analysis.problem_summary.lower()
+
+
+def test_detailed_opening_needs_no_followups(monkeypatch):
+    _stub_places(monkeypatch)
+
+    def fake_analyze(_history, **_kwargs):
+        return _analysis(
+            problem_summary=(
+                "Kitchen sink leaking under the cabinet since this morning, "
+                "still dripping, shutoff is reachable."
+            ),
+            facts={
+                "fixture": "kitchen sink",
+                "started": "this morning",
+                "still_running": "dripping",
+                "shutoff": "reachable",
+            },
+            missing_details=[],
+            next_question=None,
+            dispatch_ready=True,
+        ), False
+
+    monkeypatch.setattr("app.llm.analyze", fake_analyze)
+    session = agent.create_session("detailed-open")
+    agent.handle_location(session, "Austin, TX 78704")
+    agent.handle_user_message(
+        session,
+        "Kitchen sink has been leaking under the cabinet since this morning, "
+        "still dripping. I can reach the shutoff.",
+    )
+    assert session.stage == Stage.showing_providers
+    assert session.questions_asked == 0
+    assert session.analysis.dispatch_ready is True
+    assert session.analysis.facts["fixture"] == "kitchen sink"
+
+
+def test_ambiguous_house_problem_keeps_clarifying(monkeypatch):
+    _stub_places(monkeypatch)
+    call = {"n": 0}
+
+    def fake_analyze(_history, **_kwargs):
+        call["n"] += 1
+        questions = [
+            "Which part of the home is affected, and what did you notice?",
+            "Is this a water problem, an electrical problem, or something else?",
+            "When did it start, and is it getting worse?",
+        ]
+        return _analysis(
+            service_category=ServiceCategory.unknown,
+            category_confidence=0.3,
+            problem_summary="Something is wrong with the house.",
+            facts={},
+            missing_details=["what is happening"],
+            next_question=questions[min(call["n"] - 1, len(questions) - 1)],
+            dispatch_ready=False,
+        ), False
+
+    monkeypatch.setattr("app.llm.analyze", fake_analyze)
+    session = agent.create_session("ambiguous-house")
+    agent.handle_location(session, "Austin, TX 78704")
+    agent.handle_user_message(
+        session,
+        "I need help with the house but I cannot tell what kind of problem it is.",
+    )
+    assert session.stage == Stage.gathering
+    agent.handle_user_message(session, "utilities maybe")
     assert session.stage == Stage.gathering
     assert session.questions_asked >= 2
     assert session.providers == []
-    second = session.messages[-1].content.lower()
-    assert "enough to search" not in second
-    assert second != first
+    assert session.questions_asked <= agent.MAX_FOLLOWUPS
+
+
+def test_repeated_unknown_answers_do_not_get_stuck(monkeypatch):
+    _stub_places(monkeypatch)
+    turns = {"n": 0}
+
+    def fake_analyze(_history, **_kwargs):
+        turns["n"] += 1
+        if turns["n"] == 1:
+            return _analysis(
+                next_question="Can you describe the leak in more detail?",
+                dispatch_ready=False,
+            ), False
+        return _analysis(
+            facts={"leak_detail": "unknown"},
+            missing_details=[],
+            next_question=None,
+            dispatch_ready=True,
+        ), False
+
+    monkeypatch.setattr("app.llm.analyze", fake_analyze)
+    session = agent.create_session("repeat-idk")
+    agent.handle_location(session, "Austin, TX 78704")
+    agent.handle_user_message(session, "my sink is leaking")
+    assert session.stage == Stage.gathering
+    agent.handle_user_message(session, "idk")
+    last = session.messages[-1].content.lower()
+    assert "leak or clog" not in last
+    assert session.stage == Stage.showing_providers
+    assert session.questions_asked == 1
+    assert session.providers
+    assert session.analysis.dispatch_ready is True
+    assert session.analysis.facts["leak_detail"] == "unknown"
+
+
+def test_python_does_not_stop_on_unknown_wording(monkeypatch):
+    """Intake stops only when the LLM says so, not because the reply looks like a shrug."""
+    _stub_places(monkeypatch)
+    turns = {"n": 0}
+
+    def fake_analyze(_history, **_kwargs):
+        turns["n"] += 1
+        if turns["n"] == 1:
+            return _analysis(
+                next_question="Is water still leaking right now?",
+                dispatch_ready=False,
+            ), False
+        return _analysis(
+            facts={"still_running": "unknown"},
+            next_question="Which room and fixture is leaking?",
+            dispatch_ready=False,
+        ), False
+
+    monkeypatch.setattr("app.llm.analyze", fake_analyze)
+    session = agent.create_session("idk-other-slot")
+    agent.handle_location(session, "Austin, TX 78704")
+    agent.handle_user_message(session, "my sink is leaking")
+    agent.handle_user_message(session, "idk")
+    last = session.messages[-1].content.lower()
+    assert session.stage == Stage.gathering
+    assert session.questions_asked == 2
+    assert "which room" in last
+    assert "fixture" in last
+    assert session.providers == []
+
+
+def test_discolored_water_stops_before_diagnostic_extras(monkeypatch):
+    _stub_places(monkeypatch)
+    turns = {"n": 0}
+
+    def fake_analyze(history, **_kwargs):
+        turns["n"] += 1
+        last = next(
+            (m.content.lower() for m in reversed(history) if m.role == "user"),
+            "",
+        )
+        if "every faucet" in last:
+            return _analysis(
+                problem_summary=(
+                    "Discolored water at every faucet, hot and cold, started today."
+                ),
+                facts={
+                    "symptom": "discolored water",
+                    "scope": "every faucet, hot and cold",
+                    "started": "today",
+                },
+                missing_details=[],
+                next_question="Is the water pressure also low?",
+                dispatch_ready=True,
+            ), False
+        return _analysis(
+            problem_summary="Discolored water throughout the house.",
+            facts={"symptom": "discolored water", "scope": "throughout the house"},
+            missing_details=["which fixtures", "when it started"],
+            next_question="Is it every faucet, both hot and cold, and when did it start?",
+            dispatch_ready=False,
+        ), False
+
+    monkeypatch.setattr("app.llm.analyze", fake_analyze)
+    session = agent.create_session("brown-water")
+    agent.handle_location(session, "Austin, TX 78704")
+    agent.handle_user_message(
+        session,
+        "The water in my house is brown and discolored throughout.",
+    )
+    assert session.stage == Stage.gathering
+    assert session.questions_asked == 1
+    agent.handle_user_message(
+        session,
+        "It's every faucet, both hot and cold, and it started today.",
+    )
+    assert session.stage == Stage.showing_providers
+    assert session.questions_asked == 1
+    chat = " ".join(m.content.lower() for m in session.messages if m.role == "assistant")
+    assert "pressure" not in chat
+    assert "neighbor" not in chat
+    assert session.analysis.facts["scope"] == "every faucet, hot and cold"
+    assert session.analysis.facts["started"] == "today"
 
 
 def test_header_location_does_not_abort_gathering(monkeypatch):

@@ -1,4 +1,13 @@
-from app.llm import analyze, fallback_analysis, fallback_safety_reply, parse_analysis, _sanitize_safety_text
+from app.llm import (
+    analyze,
+    draft_problem_paragraph,
+    fallback_analysis,
+    fallback_problem_paragraph,
+    fallback_safety_reply,
+    parse_analysis,
+    _sanitize_problem_paragraph,
+    _sanitize_safety_text,
+)
 from app.models import ChatMessage, Hazard, ServiceCategory, Urgency
 
 
@@ -140,3 +149,61 @@ def test_sanitize_safety_text_appends_911_if_missing():
         mode="escalate",
     )
     assert "911" in text
+
+
+def test_fallback_problem_paragraph_uses_homeowner_chat():
+    history = [
+        ChatMessage(role="assistant", content="What are you noticing with the water?"),
+        ChatMessage(
+            role="user",
+            content="The color is murky, the smell is very foul. Temperature is hot.",
+        ),
+        ChatMessage(role="user", content="I'm not sure"),
+    ]
+    text = fallback_problem_paragraph(history, problem_summary="ignored when chat exists")
+    lowered = text.lower()
+    assert "murky" in lowered
+    assert "foul" in lowered
+    assert "hot" in lowered
+    assert "i'm not sure" in lowered
+    assert "what are you noticing" not in lowered
+
+
+def test_draft_problem_paragraph_falls_back_without_client(monkeypatch):
+    monkeypatch.setattr("app.llm._client", lambda **_k: None)
+    history = [
+        ChatMessage(role="user", content="Kitchen sink leaking onto the floor."),
+    ]
+    text, used_fallback = draft_problem_paragraph(history, problem_summary="unused")
+    assert used_fallback is True
+    assert "kitchen sink leaking" in text.lower()
+
+
+def test_draft_problem_paragraph_uses_model_text(monkeypatch):
+    monkeypatch.setattr("app.llm._client", lambda **_k: object())
+    monkeypatch.setattr(
+        "app.llm._complete",
+        lambda *_a, **_k: (
+            "The water is murky and smells foul. It is happening on the hot water."
+        ),
+    )
+    history = [
+        ChatMessage(role="user", content="The color is murky and the smell is foul."),
+    ]
+    text, used_fallback = draft_problem_paragraph(
+        history,
+        problem_summary="Murky water",
+        facts={"color": "murky"},
+    )
+    assert used_fallback is False
+    assert "murky" in text.lower()
+    assert "foul" in text.lower()
+
+
+def test_sanitize_problem_paragraph_drops_greeting():
+    text = _sanitize_problem_paragraph(
+        "Hello Bob,\nThe kitchen sink is leaking under the cabinet.\nSincerely, Alex"
+    )
+    assert "Hello" not in text
+    assert "Sincerely" not in text
+    assert "kitchen sink is leaking" in text.lower()

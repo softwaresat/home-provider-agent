@@ -941,9 +941,10 @@ def turn_guidance(
     facts: dict[str, str] | None = None,
     asked: list[str] | None = None,
 ) -> str | None:
-    """Hints for this trade, or None before a category is known.
+    """Compact optional hints for this trade, or None before a category is known.
 
     `text` is ignored. We do not match the homeowner's wording against the catalog.
+    This is not a checklist: do not inject every remaining catalog question.
     """
     del text
     if category in {ServiceCategory.unknown}:
@@ -951,27 +952,26 @@ def turn_guidance(
     pool = problems_for_category(category)
     if not pool:
         return None
-    header = (
-        "Optional intake hints for this turn. Not a script and not a diagnosis. "
-        f"The current trade guess is {category.value}. "
-        "These are example jobs for that trade, not a confirmed type. "
-        "Ask at most ONE question. Decide from the conversation what is already "
-        "answered. If the job is unusual or spans trades, ignore these hints."
+    labels = "; ".join(problem.label for problem in pool)
+    asked_n = len(asked or [])
+    return "\n".join(
+        [
+            "Optional intake hints for this turn. Not a checklist, not a script, "
+            "and not a diagnosis.",
+            f"The current trade guess is {category.value}.",
+            f"Example jobs (not a confirmed type): {labels}.",
+            f"Follow-ups already asked: {asked_n}. Ask at most ONE question, and only "
+            "if the answer could change the trade, urgency, or whether a technician "
+            "can do the job.",
+            "Do not exhaust this list. Skip diagnostic extras (pressure, neighbors, "
+            "troubleshooting steps, root cause) once you know the main symptom, "
+            "where or how widespread it is, and roughly when it started.",
+            "Set dispatch_ready true and next_question null as soon as a dispatcher "
+            "could brief a provider. If they do not know an answer, record that slot "
+            "as unknown (not a negative). If a trade can already be briefed, stop; "
+            "otherwise ask a different useful question, never the same slot, never a "
+            "canned leak/clog substitute. If the job is unusual or spans trades, "
+            "ignore these hints.",
+        ]
     )
-    lines = [header, "Example jobs and remaining questions:"]
-    any_questions = False
-    for problem in pool:
-        remaining = unanswered_questions(problem, facts=facts, asked=asked)
-        useful = [item for item in remaining if item.priority <= PRIORITY_DISPATCH]
-        if not useful:
-            continue
-        any_questions = True
-        bits = "; ".join(item.question for item in useful)
-        lines.append(f"- {problem.label}: {bits}")
-    if not any_questions:
-        lines.append(
-            "No unanswered catalog questions for this trade. "
-            "Set next_question to null only if a dispatcher could search."
-        )
-    return "\n".join(lines)
 

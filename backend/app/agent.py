@@ -127,6 +127,33 @@ def _apply_location(session: SessionState, city: Optional[str], zip_code: Option
         session.location_query = location_label(session)
 
 
+_SHRUG_SUMMARY_RE = re.compile(
+    r"\b(idk|dunno|whatever|"
+    r"(i\s+)?((do\s+not|don'?t)\s+know)|not sure|no idea)\b",
+    re.IGNORECASE,
+)
+_CHATTY_SUMMARY_RE = re.compile(
+    r"\b(idk|lol|yes i am safe|i don't know what happened)\b",
+    re.IGNORECASE,
+)
+
+
+def _prefer_problem_summary(old: str, incoming: str) -> str:
+    """Keep a specific summary when a later turn is a shrug or chat dump."""
+    old = (old or "").strip()
+    incoming = (incoming or "").strip()
+    if not incoming:
+        return old
+    if not old:
+        return incoming
+    incoming_words = len(re.findall(r"[a-z0-9]+", incoming.lower()))
+    if _SHRUG_SUMMARY_RE.search(incoming) and incoming_words <= 12:
+        return old
+    if _CHATTY_SUMMARY_RE.search(incoming) and not _CHATTY_SUMMARY_RE.search(old):
+        return old
+    return incoming
+
+
 def merge_analysis(session: SessionState, incoming: LLMAnalysis) -> None:
     # Header/explicit location wins. Do not re-merge stale city/ZIP from chat or the LLM.
     if not (session.city or session.zip_code or session.location_query):
@@ -161,7 +188,9 @@ def merge_analysis(session: SessionState, incoming: LLMAnalysis) -> None:
         if incoming.urgency_reason:
             old.urgency_reason = incoming.urgency_reason
     if incoming.problem_summary:
-        old.problem_summary = incoming.problem_summary
+        old.problem_summary = _prefer_problem_summary(
+            old.problem_summary, incoming.problem_summary
+        )
     for key, value in incoming.facts.items():
         if value:
             old.facts[key] = value
@@ -169,6 +198,7 @@ def merge_analysis(session: SessionState, incoming: LLMAnalysis) -> None:
     old.zip_code = session.zip_code
     old.missing_details = incoming.missing_details
     old.next_question = incoming.next_question
+    old.dispatch_ready = bool(incoming.dispatch_ready)
     incoming_hazards = {h.value: h for h in incoming.hazards}
     for hazard in session.hazards:
         incoming_hazards[hazard.value] = hazard
@@ -232,38 +262,44 @@ def _is_forbidden_chat_question(question: str) -> bool:
     return _question_looks_like_location(question) or _question_looks_like_contact(question)
 
 
-def _proposed_question(session: SessionState) -> Optional[str]:
-    if not session.analysis:
+def _usable_question(question: Optional[str], asked: list[str]) -> Optional[str]:
+    if not question or _is_forbidden_chat_question(question):
         return None
-    return session.analysis.next_question
+    if _is_redundant(question, asked):
+        return None
+    return question
 
 
-def _usable_chat_question(session: SessionState, allow_fallback: bool) -> Optional[str]:
-    question = _proposed_question(session)
+def _next_followup(session: SessionState) -> Optional[str]:
+    """Next chat question, or None when intake should search.
+
+    Policy: ask only a usable LLM question that could still change dispatch.
+    Do not inspect homeowner wording. Stop when dispatch_ready, the proposed
+    question is null/unusable, the question is redundant or forbidden, or
+    MAX_FOLLOWUPS. Once a trade is known, never invent `_fallback_question`.
+    Keyword fallback is only when the category is still unknown and DeepSeek
+    is down.
+    """
+    if session.questions_asked >= MAX_FOLLOWUPS:
+        return None
+    if session.analysis and session.analysis.dispatch_ready:
+        return None
+
+    proposed = _usable_question(
+        session.analysis.next_question if session.analysis else None,
+        session.asked_questions,
+    )
+    if proposed:
+        return proposed
     if (
-        question
-        and not _is_forbidden_chat_question(question)
-        and not _is_redundant(question, session.asked_questions)
+        session.llm_fallback_used
+        and effective_category(session) == ServiceCategory.unknown
     ):
-        return question
-    if not allow_fallback:
-        return None
-    fallback = llm._fallback_question(effective_category(session))
-    if _is_forbidden_chat_question(fallback) or _is_redundant(fallback, session.asked_questions):
-        return None
-    return fallback
-
-
-def _last_user_content(session: SessionState) -> str:
-    for message in reversed(session.messages):
-        if message.role == "user":
-            return message.content or ""
-    return ""
-
-
-def _reply_too_thin_to_search(text: str) -> bool:
-    words = re.findall(r"[a-z0-9]+", (text or "").lower())
-    return len(words) <= 2
+        return _usable_question(
+            llm._fallback_question(ServiceCategory.unknown),
+            session.asked_questions,
+        )
+    return None
 
 
 def _ask_followup(session: SessionState, question: str, spoken: Optional[str] = None) -> None:
@@ -386,24 +422,15 @@ def _continue_intake(session: SessionState) -> None:
         return
 
     at_cap = session.questions_asked >= MAX_FOLLOWUPS
-    proposed = _proposed_question(session)
+    question = _next_followup(session)
 
     if (
-        not at_cap
-        and proposed
-        and _question_looks_like_location(proposed)
+        question
+        and _question_looks_like_location(question)
         and not has_location(session)
     ):
         _prompt_location_field(session)
         return
-
-    # Do not search after a shrug like "idk". Catalog slots are hints for the
-    # LLM, not a checklist Python walks when the model returns null.
-    allow_fallback = (
-        not category_ready(session)
-        or _reply_too_thin_to_search(_last_user_content(session))
-    )
-    question = None if at_cap else _usable_chat_question(session, allow_fallback=allow_fallback)
 
     if question:
         spoken = question
@@ -422,7 +449,7 @@ def _continue_intake(session: SessionState) -> None:
         _prompt_location_field(session, preface)
         return
 
-    if at_cap and effective_category(session) == ServiceCategory.unknown:
+    if effective_category(session) == ServiceCategory.unknown:
         session.category_override = ServiceCategory.handyman
     if at_cap:
         preface = "I will search with the details collected so far rather than asking more questions."
@@ -465,15 +492,15 @@ def handle_user_message(session: SessionState, text: str) -> SessionState:
     if used_fallback:
         session.llm_fallback_used = True
 
-    new_hazards = rule_hazards + analysis.hazards
-    if safety.is_escalation(new_hazards):
-        session.safety_cleared = False
-    elif session.stage == Stage.safety_escalated and safety.user_says_safe(text):
+    # 911 hold/release is this-turn Python: detect_hazards(text) already held
+    # above. DeepSeek often repeats gas/smoke/CO labels from earlier chat;
+    # those must not un-clear safety or re-send escalate copy.
+    if session.stage == Stage.safety_escalated and safety.user_says_safe(text):
         session.safety_cleared = True
         session.stage = Stage.gathering
         _safety_copy(session, text, "resume")
 
-    merged_hazards = {h.value: h for h in (session.hazards + new_hazards)}
+    merged_hazards = {h.value: h for h in (session.hazards + rule_hazards + analysis.hazards)}
     session.hazards = list(merged_hazards.values())
     analysis.hazards = session.hazards
     merge_analysis(session, analysis)
@@ -491,7 +518,7 @@ def handle_user_message(session: SessionState, text: str) -> SessionState:
         _append_assistant(session, _safety_copy(session, text, "escalate"))
         return session
 
-    if any(h in CAUTION_HAZARDS for h in new_hazards):
+    if any(h in CAUTION_HAZARDS for h in rule_hazards):
         _safety_copy(session, text, "caution")
 
     if prior_stage == Stage.collecting_contact:

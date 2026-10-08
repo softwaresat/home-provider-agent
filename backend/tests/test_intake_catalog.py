@@ -26,10 +26,14 @@ def test_no_hints_until_a_trade_is_known():
 def test_plumbing_hints_list_example_jobs_not_a_match():
     guidance = turn_guidance(ServiceCategory.plumbing, facts={}, asked=[])
     assert guidance is not None
-    assert "not a diagnosis" in guidance
+    assert "not a diagnosis" in guidance.lower()
+    assert "not a checklist" in guidance.lower()
     assert "leaking pipe or fixture" in guidance
     assert "clogged drain" in guidance
     assert "Ask at most ONE question" in guidance
+    assert "dispatch_ready" in guidance
+    # Do not dump every remaining catalog question as a script.
+    assert "Can a technician reach the shutoff valve?" not in guidance
 
 
 def test_unanswered_skips_only_llm_facts_not_keywords_in_text():
@@ -75,15 +79,16 @@ def test_already_asked_treats_paraphrase_as_redundant():
     )
 
 
-def test_guidance_omits_slots_the_llm_already_extracted():
+def test_guidance_stays_compact_when_facts_are_known():
     guidance = turn_guidance(
         ServiceCategory.plumbing,
         facts={"location": "basement pipe"},
-        asked=[],
+        asked=["Which fixture is leaking, and which room is it in?"],
     )
     assert guidance is not None
+    assert "Follow-ups already asked: 1" in guidance
+    assert "leaking pipe or fixture" in guidance
     assert "Which fixture is leaking, and which room is it in?" not in guidance
-    assert "Is water still leaking right now?" in guidance
 
 
 def test_handyman_hints_do_not_depend_on_user_keywords():

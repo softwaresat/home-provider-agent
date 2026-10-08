@@ -28,25 +28,37 @@ Return ONLY a JSON object with this shape:
   "city": null,
   "zip_code": null,
   "hazards": [],
-  "missing_details": ["important unknown facts"],
-  "next_question": "ONE targeted question, or null if enough is known to search providers"
+  "missing_details": ["dispatch-critical unknowns only"],
+  "next_question": "ONE targeted question, or null if a provider can be matched",
+  "dispatch_ready": false
 }
 
 Valid hazards: gas_leak, fire_smoke, electrical, flood_electrical, carbon_monoxide.
 
-Question guidance — ask only what is still missing; never ask two questions; never repeat:
-Keep asking while important dispatch or safety details are missing. Do not stop after
-one question if the job is still vague.
+Dispatch readiness — maximize information per question, not question count:
+A lead is ready when you know the main symptom, roughly where/how widespread it is,
+urgency/timing, and any safety issue that would change routing. You do not need a
+root cause, a full diagnosis, or a catalog checklist.
+Set dispatch_ready true and next_question null as soon as a dispatcher could pick a
+trade and brief a contractor. Typical jobs need 0–3 follow-ups. Vague jobs may need
+a few more. Do not keep asking because extra diagnostic detail would be nice.
+Do not ask about water pressure, neighbors, flushing fixtures, brand/model, or
+"have you tried…" unless the answer would change the trade, urgency, or safety.
+If the opening message is already enough, ask nothing.
+If the homeowner does not know, record that slot as unknown in facts (not as a
+negative finding). Keep every fact and the problem_summary already collected —
+never replace problem_summary with a shrug ("I am not sure") or a chat transcript.
+If a trade can already be briefed, set next_question to null and dispatch_ready
+true. Otherwise ask a different useful question — never the same slot, never a
+canned leak/clog substitute. Explicit "no" / "not leaking" belongs in facts as a
+confirmed negative, distinct from unknown.
+Extract every useful detail they already said into facts and problem_summary.
+
+Question rules: never ask two questions; never repeat; never ask city, ZIP, name,
+phone, email, or any address.
 A short optional "intake hints" block may appear after a trade is known. It lists
-example jobs for that trade. It is not a match, not a script, and not a diagnosis.
-You decide from the conversation what is already answered; a single word does not
-fill every slot. If hints are present and one example clearly fits, prefer one
-unanswered high-priority question, rephrased naturally.
-If no hints apply, or the job is unusual, ambiguous, or spans trades, ask your own
-best dispatch question — do not force the job into a listed type.
-Set next_question to null when a dispatcher could search and brief a provider.
-Never ask for city, ZIP, name, phone, email, or any address.
-Prioritize safety-relevant missing details, then dispatch details.
+example jobs, not a match and not a script. Use at most one hint, and only if it
+would change dispatch. Ignore hints for unusual or mixed-trade jobs.
 If the user described an emergency (gas, fire, CO), set the matching hazard and urgency emergency.
 """
 
@@ -88,6 +100,23 @@ Rules:
 - Do not ask for name, phone, email, city, ZIP, or address.
 
 Write 2-3 short sentences. Return ONLY the message text.
+"""
+
+EMAIL_PROBLEM_PROMPT = """You write the problem paragraph of a homeowner's email to a contractor.
+Python already has the greeting, service timing, address, phone, and signature. You write
+ONLY the description of the problem.
+
+Rules:
+- First person (I/my), as the homeowner would write it.
+- Use only the chat transcript and any collected notes. Do not invent symptoms, causes,
+  or a diagnosis.
+- Include contractor-useful details they already gave (what they notice, where/how
+  widespread, timing). If they said they do not know something, say that it is unknown
+  rather than turning it into a no.
+- Do not name, invent, or recommend businesses.
+- Do not include name, phone, email, city, ZIP, or any street address.
+- Do not greet, sign off, or use markdown or bullet labels.
+- 2-6 short sentences. Return ONLY the paragraph text.
 """
 
 FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE | re.MULTILINE)
@@ -175,8 +204,16 @@ def fallback_analysis(user_text: str, history: list[ChatMessage] | None = None) 
     if len(summary) > 280:
         summary = summary[:277] + "..."
 
-    next_question = _fallback_question(category)
-    missing_details = ["problem details"]
+    words = len(re.findall(r"[a-z0-9]+", blob.lower()))
+    detailed = category != ServiceCategory.unknown and words >= 16
+    if detailed:
+        next_question = None
+        missing_details: list[str] = []
+        dispatch_ready = True
+    else:
+        next_question = _fallback_question(category)
+        missing_details = ["problem details"]
+        dispatch_ready = False
     return LLMAnalysis(
         service_category=category,
         category_confidence=confidence,
@@ -186,6 +223,7 @@ def fallback_analysis(user_text: str, history: list[ChatMessage] | None = None) 
         facts={},
         next_question=next_question,
         missing_details=missing_details,
+        dispatch_ready=dispatch_ready,
     )
 
 
@@ -346,6 +384,94 @@ def _sanitize_safety_text(raw: str, mode: str) -> str:
     if mode == "escalate" and "911" not in lowered and "emergency" not in lowered:
         text = text.rstrip(".") + ". From a safe place, call 911."
     return text
+
+
+def fallback_problem_paragraph(
+    history: list[ChatMessage] | None,
+    problem_summary: str = "",
+) -> str:
+    """Homeowner's own words when DeepSeek is unavailable. Not a scripted symptom list."""
+    lines: list[str] = []
+    for message in history or []:
+        if message.role != "user":
+            continue
+        text = " ".join((message.content or "").split())
+        if text:
+            lines.append(text)
+    if lines:
+        return " ".join(lines)
+    return " ".join((problem_summary or "").split())
+
+
+def _transcript_packet(
+    history: list[ChatMessage] | None,
+    problem_summary: str,
+    facts: dict[str, str] | None,
+) -> str:
+    blocks: list[str] = ["Homeowner chat:"]
+    if history:
+        for message in history:
+            if message.role not in {"user", "assistant"}:
+                continue
+            content = " ".join((message.content or "").split())
+            if not content:
+                continue
+            label = "Homeowner" if message.role == "user" else "Assistant"
+            blocks.append(f"{label}: {content}")
+    else:
+        blocks.append("(no chat messages)")
+    summary = " ".join((problem_summary or "").split())
+    if summary:
+        blocks.extend(["", f"Collected summary: {summary}"])
+    if facts:
+        note_lines = [f"- {key}: {value}" for key, value in facts.items() if value]
+        if note_lines:
+            blocks.extend(["", "Collected notes:"] + note_lines)
+    return "\n".join(blocks)
+
+
+def _sanitize_problem_paragraph(raw: str) -> str:
+    text = strip_fences(raw).strip().strip('"')
+    kept: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        lowered = stripped.lower()
+        if lowered.startswith(("hello ", "dear ", "hi ")):
+            continue
+        if lowered.startswith(("sincerely", "thank you", "thanks,")):
+            continue
+        kept.append(stripped)
+    text = " ".join(kept)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) < 8:
+        raise ValueError("Problem paragraph too short")
+    if len(text) > 1500:
+        text = text[:1497].rsplit(" ", 1)[0] + "..."
+    return text
+
+
+def draft_problem_paragraph(
+    history: list[ChatMessage] | None,
+    problem_summary: str = "",
+    facts: dict[str, str] | None = None,
+) -> tuple[str, bool]:
+    """Return (paragraph, used_fallback) from the intake transcript."""
+    fallback = fallback_problem_paragraph(history, problem_summary)
+    client = _client(timeout=12.0)
+    if client is None:
+        return fallback, True
+
+    api_messages = [
+        {"role": "system", "content": EMAIL_PROBLEM_PROMPT},
+        {"role": "user", "content": _transcript_packet(history, problem_summary, facts)},
+    ]
+    try:
+        raw = _complete(client, api_messages, use_json_mode=False)
+        return _sanitize_problem_paragraph(raw), False
+    except Exception:  # noqa: BLE001 — envelope still ships; wording may fall back
+        return fallback, True
 
 
 def safety_reply(

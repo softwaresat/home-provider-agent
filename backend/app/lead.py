@@ -1,11 +1,13 @@
-"""Assemble a validated lead and a deterministic dispatch email draft."""
+"""Assemble a validated lead and a dispatch email draft. Never sent."""
 
 from __future__ import annotations
 
 import re
 from urllib.parse import quote
 
+from app import llm
 from app.models import (
+    ChatMessage,
     ContactInfo,
     EmailDraft,
     Lead,
@@ -121,21 +123,6 @@ def build_lead(session: SessionState) -> Lead:
     )
 
 
-_SKIP_DETAIL_VALUES = {
-    "",
-    "unknown",
-    "none",
-    "n/a",
-    "na",
-    "null",
-    "not provided",
-}
-_YES = {"yes", "true", "y"}
-_NO = {"no", "false", "n"}
-_CHAT_MARKERS = re.compile(
-    r"\b(yes i am safe|idk|lol|idk what happened|i don't know what happened to my)\b",
-    re.IGNORECASE,
-)
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 _CATEGORY_PHRASE = {
     ServiceCategory.plumbing: "plumbing",
@@ -148,84 +135,6 @@ _CATEGORY_PHRASE = {
     ServiceCategory.handyman: "handyman",
     ServiceCategory.unknown: "home service",
 }
-
-
-def _norm_key(key: str) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", str(key).lower()).strip()
-
-
-def _humanize_text(text: str) -> str:
-    cleaned = re.sub(r"[_\-]+", " ", str(text or ""))
-    return re.sub(r"\s+", " ", cleaned).strip()
-
-
-def _human_value(value: object) -> str | None:
-    text = _humanize_text(str(value))
-    lowered = text.lower()
-    if lowered in _SKIP_DETAIL_VALUES:
-        return None
-    return text
-
-
-def _is_useless_fragment(text: str) -> bool:
-    lowered = text.lower().strip(" .")
-    if lowered in _SKIP_DETAIL_VALUES or lowered in {"none reported", "not reported", "n/a"}:
-        return True
-    if re.search(r"\b(is|are|was|were|have|has|had|my|the|i|it)\b", lowered):
-        return False
-    words = re.findall(r"[a-z]+", lowered)
-    return len(words) <= 4
-
-
-def _to_homeowner_voice(text: str) -> str:
-    t = _humanize_text(text)
-    substitutions = (
-        (r"\b[Tt]he homeowner\b", "I"),
-        (r"\b[Tt]he customer\b", "I"),
-        (r"\b[Tt]he occupant[s]?\b", "I"),
-        (r"\bI has\b", "I have"),
-        (r"\bI is\b", "I am"),
-        (r"\bI was reported\b", "I"),
-        (r"\bEveryone at the property is currently safe\b", "I am safe"),
-        (r"\bNo visible ([^.]+?) reported\b", r"I do not see \1"),
-        (r"\breported\.?\s*$", "."),
-    )
-    for pattern, repl in substitutions:
-        t = re.sub(pattern, repl, t)
-    t = re.sub(r"\s+", " ", t).strip()
-    t = re.sub(r"\s+\.", ".", t)
-    return t
-
-
-def _as_homeowner_summary(text: str) -> str:
-    t = _to_homeowner_voice(text)
-    if not t:
-        return ""
-    return _finish_sentence(t)
-
-
-def _looks_like_chat(text: str) -> bool:
-    stripped = " ".join((text or "").split())
-    if not stripped:
-        return True
-    if _CHAT_MARKERS.search(stripped):
-        return True
-    if stripped[:1].islower():
-        return True
-    if len(stripped) > 70 and not re.search(r"[.!?]", stripped):
-        return True
-    return False
-
-
-def _finish_sentence(text: str) -> str:
-    stripped = " ".join((text or "").split())
-    if not stripped:
-        return ""
-    if stripped[:1].islower():
-        stripped = stripped[:1].upper() + stripped[1:]
-    if stripped[-1] not in ".!?":
-        stripped += "."
-    return stripped
 
 
 def _format_phone(raw: str) -> str:
@@ -304,126 +213,72 @@ def _request_sentence(lead: Lead) -> str:
     return f"I would like to request {timing} at my home in {location}."
 
 
-def _content_fingerprint(text: str) -> str:
-    lowered = text.lower()
-    lowered = re.sub(
-        r"^(the issue is at the|it is in the|it is at the|this is in the)\s+",
-        "",
-        lowered,
+def _reuse_problem_paragraph(body: str, lead: Lead) -> str | None:
+    """Keep a previously drafted problem block when only envelope fields changed."""
+    request = _request_sentence(lead)
+    if request not in (body or ""):
+        return None
+    rest = body.split(request, 1)[1]
+    if lead.service_address:
+        marker = f"The service address is {lead.service_address}."
+        if marker in rest:
+            rest = rest.split(marker, 1)[0]
+    if "Please contact me at" in rest:
+        rest = rest.split("Please contact me at", 1)[0]
+    if "Sincerely," in rest:
+        rest = rest.split("Sincerely,", 1)[0]
+    text = rest.strip()
+    return text or None
+
+
+def _problem_paragraph(
+    lead: Lead,
+    messages: list[ChatMessage] | None,
+    previous: EmailDraft | None = None,
+) -> str:
+    if previous and previous.body:
+        reused = _reuse_problem_paragraph(previous.body, lead)
+        if reused:
+            return reused
+    paragraph, _used_fallback = llm.draft_problem_paragraph(
+        messages or [],
+        problem_summary=lead.problem_summary,
+        facts=lead.problem_details,
     )
-    return re.sub(r"[^a-z0-9]+", " ", lowered).strip()
+    return (paragraph or "").strip()
 
 
-def _fact_sentence(key: str, value: str) -> str | None:
-    key_n = _norm_key(key)
-    val = _humanize_text(value)
-    val_l = val.lower()
-    if any(token in key_n for token in ("safety sign", "hazard", "next question")):
-        return None
-    if val_l.startswith("confirmed"):
-        return None
-    if val_l in {"none reported", "not reported"}:
-        return None
+def _assemble_body(lead: Lead, provider: Provider, problem: str) -> str:
+    name = lead.customer_name or "Homeowner"
+    lines = [
+        f"Hello {provider.name},",
+        "",
+        _request_sentence(lead),
+    ]
+    if problem:
+        lines.extend(["", problem])
+    if lead.service_address:
+        lines.extend(["", f"The service address is {lead.service_address}."])
 
-    if "cause" in key_n:
-        if val_l in _NO or "unknown" in val_l:
-            return "I do not know what caused it."
-        if val_l not in _YES:
-            return _finish_sentence(f"I think the cause is {val_l}")
-        return None
-
-    if any(token in key_n for token in ("lights out", "power loss", "power out", "outage")):
-        if any(token in val_l for token in ("entire", "whole", "all", "throughout")):
-            return "The power is out throughout the house."
-        if val_l in _YES:
-            return "The lights are out."
-        if val_l not in _NO:
-            return _finish_sentence(f"The outage involves {val_l}")
-        return None
-
-    if any(token in key_n for token in ("active", "still leaking", "still dripping")):
-        if val_l in _YES:
-            return "It is still leaking."
-        if val_l in _NO:
-            return "The leak has stopped for now."
-        return None
-
-    if key_n in {"location", "leak location", "fixture", "area", "room"}:
-        if val_l in _YES | _NO:
-            return None
-        return _finish_sentence(f"It is in the {val_l}")
-
-    if "shut" in key_n and "off" in key_n:
-        if val_l in _YES:
-            return "I shut off the water."
-        if val_l in _NO:
-            return "I have not shut off the water."
-        return None
-
-    if key_n in {"appliance", "unit"}:
-        if val_l in _YES | _NO:
-            return None
-        return _finish_sentence(f"The appliance is the {val_l}")
-
-    if "safe" in key_n:
-        if val_l in _YES:
-            return "I am safe."
-        return None
-
-    if val_l in _YES | _NO:
-        return None
-    if _is_useless_fragment(val):
-        return None
-    voiced = _to_homeowner_voice(val)
-    if not re.search(r"\b(is|are|was|were|have|has|had|i|my|it)\b", voiced.lower()):
-        return None
-    return _finish_sentence(voiced)
+    contact_bits = []
+    if lead.customer_phone:
+        contact_bits.append(_format_phone(lead.customer_phone))
+    if lead.customer_email:
+        contact_bits.append(lead.customer_email)
+    if contact_bits:
+        joined = " or ".join(contact_bits)
+        lines.extend(["", f"Please contact me at {joined} to schedule a visit."])
+    lines.extend(["", "Sincerely,", name, ""])
+    return "\n".join(lines)
 
 
-def _already_covered(sentence: str, blob: str) -> bool:
-    fp = _content_fingerprint(sentence)
-    if not fp:
-        return True
-    if fp in _content_fingerprint(blob):
-        return True
-    tokens = [tok for tok in fp.split() if len(tok) > 3]
-    if tokens and all(tok in blob for tok in tokens):
-        return True
-    return False
-
-
-def _problem_paragraph(lead: Lead) -> str:
-    parts: list[str] = []
-    seen: set[str] = set()
-    summary = (lead.problem_summary or "").strip()
-    if summary and not _looks_like_chat(summary):
-        polished = _as_homeowner_summary(summary)
-        if polished:
-            parts.append(polished)
-            seen.add(_content_fingerprint(polished))
-
-    blob = " ".join(parts).lower()
-    for key, value in (lead.problem_details or {}).items():
-        readable = _human_value(value)
-        if not readable:
-            continue
-        sentence = _fact_sentence(key, readable)
-        if not sentence:
-            continue
-        fingerprint = _content_fingerprint(sentence)
-        if fingerprint in seen or _already_covered(sentence, blob):
-            continue
-        seen.add(fingerprint)
-        parts.append(sentence)
-        blob = f"{blob} {sentence.lower()}"
-
-    if not parts:
-        return "I need a technician at the home."
-    return " ".join(parts)
-
-
-def draft_email(lead: Lead) -> EmailDraft | None:
-    """Write a short professional service request. Never sent."""
+def draft_email(
+    lead: Lead,
+    *,
+    messages: list[ChatMessage] | None = None,
+    previous: EmailDraft | None = None,
+) -> EmailDraft | None:
+    """Write a short professional service request from the intake chat. Never sent."""
     if lead.status != LeadStatus.complete:
         return None
     provider = lead.selected_provider
@@ -435,35 +290,10 @@ def draft_email(lead: Lead) -> EmailDraft | None:
     location = _location_phrase(lead)
     category = _CATEGORY_PHRASE.get(lead.service_category, "home service")
     urgency = URGENCY_LABEL.get(lead.urgency, lead.urgency.value)
-    name = lead.customer_name or "Homeowner"
 
     subject = f"{urgency} {category} service request - {location}"
-
-    lines = [
-        f"Hello {provider.name},",
-        "",
-        _request_sentence(lead),
-        "",
-        _problem_paragraph(lead),
-    ]
-    if lead.service_address:
-        lines.extend(["", f"The service address is {lead.service_address}."])
-
-    contact_bits = []
-    if lead.customer_phone:
-        contact_bits.append(_format_phone(lead.customer_phone))
-    if lead.customer_email:
-        contact_bits.append(lead.customer_email)
-    if contact_bits:
-        joined = " or ".join(contact_bits)
-        lines.extend(
-            [
-                "",
-                f"Please contact me at {joined} to schedule a visit.",
-            ]
-        )
-    lines.extend(["", "Sincerely,", name, ""])
-    body = "\n".join(lines)
+    problem = _problem_paragraph(lead, messages, previous=previous)
+    body = _assemble_body(lead, provider, problem)
     to_email = _extract_email(provider.email, provider.website, provider.phone)
     fallback_url, fallback_label = _call_or_listing_action(provider)
 
@@ -482,14 +312,23 @@ def draft_email(lead: Lead) -> EmailDraft | None:
 
 def refresh_email(session: SessionState) -> None:
     if session.lead and session.lead.status == LeadStatus.complete:
-        session.email = draft_email(session.lead)
+        session.email = draft_email(
+            session.lead,
+            messages=session.messages,
+            previous=session.email,
+        )
 
 
 def apply_lead(session: SessionState, contact: ContactInfo | None = None) -> None:
     if contact is not None:
         session.contact = contact
+    previous = session.email
     session.lead = build_lead(session)
     if session.lead.status == LeadStatus.complete:
-        session.email = draft_email(session.lead)
+        session.email = draft_email(
+            session.lead,
+            messages=session.messages,
+            previous=previous,
+        )
     else:
         session.email = None
