@@ -6,7 +6,7 @@ This is a 10-hour vertical slice, not a production marketplace.
 
 ## What it does
 
-1. Interprets a home problem (DeepSeek when configured, keyword fallback otherwise).
+1. Interprets a home problem with DeepSeek (`deepseek-flash`); a keyword classifier runs only if the model is down.
 2. Asks **one** follow-up at a time (up to eight) while dispatch details are missing, using `intake_catalog.py` as optional hints, and stops as soon as a provider could act on it. City/ZIP is a header field, not a chat question.
 3. Detects gas / fire / CO emergencies and **stops the lead funnel**.
 4. Searches Google Places (New) Text Search; ranks with explainable scores.
@@ -81,13 +81,13 @@ flowchart LR
   user[Homeowner] --> ui[React UI]
   ui --> api[FastAPI]
   api --> agent[agent.py orchestrator]
-  agent --> safety[safety.py rules]
+  agent --> safety[safety.py phrases plus MiniLM]
   agent --> catalog[intake_catalog.py hints]
   agent --> llm[llm.py DeepSeek JSON]
   agent --> places[places.py Google Places]
   agent --> rank[ranking.py scores]
   agent --> lead[lead.py validate plus email]
-  catalog -.->|unanswered slots only| llm
+  catalog -.->|example jobs for the trade| llm
   llm -.->|validated LLMAnalysis| agent
   places -.->|Provider listings| rank
 ```
@@ -97,8 +97,8 @@ flowchart LR
 | Interpret the problem | Own conversation `Stage` |
 | Guess category/urgency with confidence | Validate with Pydantic |
 | Extract facts and **one** next question | Cap questions at 8, drop redundant / contact / location questions, merge facts |
-| Rephrase catalog hints naturally | Look up `intake_catalog.py` by problem type; inject only unanswered slots |
-| Flag possible hazards | Run rule-based safety **first**; never skip 911 copy |
+| Rephrase catalog hints for the current trade | Inject example jobs for that trade after the model picks a category; never skip DeepSeek because of a catalog hit |
+| Flag possible hazards | Run safety **first** (phrases + MiniLM recall, then negation); never skip 911 copy |
 | Summarize the problem | Call Places; never let the model name businesses |
 | Invent questions when no catalog match | Rank with points + reason strings |
 | | Gate the lead on required fields + consent |
@@ -125,7 +125,7 @@ Sessions live in a process dict and are written to `backend/data/sessions.json` 
 
 `safety_escalated` is a hard stop for gas leak, active fire/smoke, or carbon monoxide. Sparking outlets and floodwater near electrical equipment add caution text and force **emergency** urgency but still allow finding an electrician / water-damage provider.
 
-Follow-up questions: `intake_catalog.py` covers high-frequency jobs (leaks, clogs, toilets, disposal, sewer/sump, water heater, HVAC, sparking/power, roof/gutters, water intrusion, pests, appliances, garage door/drywall). Each turn the agent injects **only unanswered** safety/dispatch hints into DeepSeek. Niche work (solar, pool, septic, EV charger, smart lock) has no entry, so the model asks independently. The catalog is guidance, not a script.
+Follow-up questions: DeepSeek always classifies the job when the API key is set. After a trade is known, `intake_catalog.py` injects example jobs and questions for that trade as optional hints — not a keyword match, not an embedding retrieval, and not a questionnaire. The model writes the question and decides what is already answered. Safety uses phrase lists plus MiniLM cosine against those phrases (typos/paraphrases such as `gass`), then negation so `I no longer smell gas` does not hold. `The gas stove will not light` stays below the hazard threshold. Niche work (solar, pool, septic, EV charger, smart lock) has no catalog row; the model should ignore the hint list for those.
 
 Users can type that they are safe to resume after an escalation.
 
@@ -171,12 +171,12 @@ Statuses: `complete` | `incomplete` | `safety_escalated`.
 
 Command: `python eval/run_eval.py`. Full table: [backend/eval/results.md](backend/eval/results.md).
 
-Latest run: **live DeepSeek (`deepseek-flash`) and live Google Places**, **20 scenarios** — 10 obvious catalog jobs (sink, toilet, water heater, AC, disposal, garage door, dishwasher, bed bugs, gutter/hail, flickering lights) and 10 edge cases (want≠pest, ants, gas, negated gas, “not safe”, sparking caution, water-near-outlets, CO, completed-lead lock, smart lock with no catalog entry).
+Latest funnel run (recorded before catalog embeddings were removed): **live DeepSeek (`deepseek-flash`) + live Google Places**, **20 scenarios**. Re-run `python eval/run_eval.py` after this change; numbers below are historical.
 
 | Proxy | Result | Meaning |
 |---|---|---|
-| Category match | **20/20** | Including want≠pest, ants→pest, garage door→handyman, smart lock→handyman without a catalog type |
-| Urgency in expected set | **20/20** | Sparking / water-near-outlets / flickering lights → emergency without a 911 hold |
+| Category match | **20/20** | Including want≠pest, ants→pest, garage door→handyman, smart lock→handyman |
+| Urgency in expected set | **19/20** | Flickering lights came back `flexible` on a path that skipped DeepSeek; that skip is gone |
 | Escalation correctness | **20/20** | Gas and CO held; “not everyone is safe” did not clear; negated gas did not trigger |
 | Edge-case checks | **20/20** | 911 copy, no search on hold, caution vs hold, lead lock |
 | Funnel completion (non-emergency) | **17/17** | The three emergencies correctly never completed |
@@ -207,7 +207,7 @@ Sample **safety path** (gas smell): first message → rule-based hold + model-wr
 ## Project layout
 
 ```
-backend/app/     FastAPI, models, agent, llm, intake_catalog, places, ranking, lead, safety
+backend/app/     FastAPI, models, agent, llm, intake_catalog, safety, safety_embed, places, ranking, lead
 backend/eval/    scenarios.json, run_eval.py, results.md
 backend/tests/
 frontend/src/  React + Vite + Tailwind

@@ -1,5 +1,5 @@
-from app.llm import fallback_analysis, fallback_safety_reply, parse_analysis, _sanitize_safety_text
-from app.models import Hazard, ServiceCategory, Urgency
+from app.llm import analyze, fallback_analysis, fallback_safety_reply, parse_analysis, _sanitize_safety_text
+from app.models import ChatMessage, Hazard, ServiceCategory, Urgency
 
 
 def test_valid_json_parses():
@@ -55,6 +55,30 @@ def test_malformed_json_raises():
         assert False, "expected json error"
     except Exception:
         pass
+
+
+def test_common_leak_still_calls_deepseek(monkeypatch):
+    monkeypatch.setattr("app.llm._client", lambda **_k: object())
+    called = {"n": 0}
+
+    def fake_complete(*_a, **_k):
+        called["n"] += 1
+        return (
+            '{"service_category":"plumbing","category_confidence":0.9,'
+            '"urgency":"same_day","urgency_reason":"Active leak",'
+            '"problem_summary":"My kitchen sink is leaking.",'
+            '"facts":{},"hazards":[],"missing_details":["still_running"],'
+            '"next_question":"Is water still leaking right now?"}'
+        )
+
+    monkeypatch.setattr("app.llm._complete", fake_complete)
+    analysis, used_fallback = analyze(
+        [ChatMessage(role="user", content="My kitchen sink has been leaking under the cabinet.")]
+    )
+    assert used_fallback is False
+    assert called["n"] >= 1
+    assert analysis.service_category == ServiceCategory.plumbing
+    assert analysis.next_question
 
 
 def test_keyword_fallback_basement_flood():

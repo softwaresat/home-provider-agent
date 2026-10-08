@@ -1,4 +1,4 @@
-"""Rule-based hazard detection. This runs before the LLM and is not probabilistic."""
+"""Hazard detection. Phrase match first, then MiniLM recall, then negation."""
 
 from __future__ import annotations
 
@@ -114,25 +114,103 @@ SAFE_PHRASES = (
 )
 
 
+def _levenshtein(left: str, right: str) -> int:
+    if left == right:
+        return 0
+    if abs(len(left) - len(right)) > 1:
+        return 2
+    prev = list(range(len(right) + 1))
+    for i, ch in enumerate(left, start=1):
+        curr = [i]
+        for j, other in enumerate(right, start=1):
+            ins = curr[j - 1] + 1
+            delete = prev[j] + 1
+            sub = prev[j - 1] + (ch != other)
+            curr.append(min(ins, delete, sub))
+        prev = curr
+    return prev[-1]
+
+
+def _tokens(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", (text or "").lower())
+
+
+def _token_close(needle: str, hay: str) -> bool:
+    if needle == hay:
+        return True
+    if min(len(needle), len(hay)) < 3:
+        return False
+    return _levenshtein(needle, hay) <= 1
+
+
+def _affirmed_at(text: str, idx: int) -> bool:
+    prefix = (text or "").lower()[max(0, idx - 48) : idx]
+    return not _NEGATION_BEFORE.search(prefix)
+
+
 def _phrase_is_affirmed(text: str, phrase: str) -> bool:
-    """True if `phrase` appears at least once without a negation immediately before it."""
+    """True if `phrase` appears without a negation immediately before it.
+
+    Exact substring first, then ordered tokens with edit distance 1 so
+    'smell gass' still matches 'smell gas'. 'gas stove' does not match
+    'gas leak' because leak is missing.
+    """
     lowered = (text or "").lower()
-    needle = phrase.lower()
+    needle = (phrase or "").lower().strip()
+    if not needle:
+        return False
     start = 0
     while True:
         idx = lowered.find(needle, start)
         if idx < 0:
-            return False
-        prefix = lowered[max(0, idx - 48) : idx]
-        if not _NEGATION_BEFORE.search(prefix):
+            break
+        if _affirmed_at(lowered, idx):
             return True
         start = idx + 1
+    needles = _tokens(needle)
+    words = _tokens(lowered)
+    if not needles or len(words) < len(needles):
+        return False
+    cursor = 0
+    for i in range(len(words) - len(needles) + 1):
+        if all(_token_close(needles[j], words[i + j]) for j in range(len(needles))):
+            idx = lowered.find(words[i], cursor)
+            if idx < 0:
+                idx = lowered.find(words[i])
+            if idx >= 0 and _affirmed_at(lowered, idx):
+                return True
+            cursor = max(cursor, idx + 1)
+    return False
+
+
+def _sentences(text: str) -> list[str]:
+    parts = re.split(r"(?<=[.!?])\s+|\n+", text or "")
+    return [part.strip() for part in parts if part.strip()]
+
+
+def _embedding_affirms_hazard(text: str, phrases: tuple[str, ...]) -> bool:
+    """Paraphrase/typo recall. Skip sentences that already contain a negation."""
+    try:
+        from app.safety_embed import MIN_COSINE, best_phrase_score, encoder
+    except Exception:
+        return False
+    if encoder() is None:
+        return False
+    for sentence in _sentences(text):
+        if _NEGATION_BEFORE.search(sentence):
+            continue
+        if best_phrase_score(sentence, phrases) >= MIN_COSINE:
+            return True
+    return False
 
 
 def detect_hazards(text: str) -> list[Hazard]:
     found: list[Hazard] = []
     for hazard, phrases in HAZARD_PHRASES.items():
         if any(_phrase_is_affirmed(text, phrase) for phrase in phrases):
+            found.append(hazard)
+            continue
+        if _embedding_affirms_hazard(text, phrases):
             found.append(hazard)
     return found
 

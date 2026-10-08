@@ -37,12 +37,14 @@ Valid hazards: gas_leak, fire_smoke, electrical, flood_electrical, carbon_monoxi
 Question guidance — ask only what is still missing; never ask two questions; never repeat:
 Keep asking while important dispatch or safety details are missing. Do not stop after
 one question if the job is still vague.
-A short optional "intake hints" block may appear for this turn. It is guidance, not a script.
-If hints are present, prefer an unanswered high-priority slot, rephrased naturally.
-If no hints apply, or the job is unusual, ambiguous, or spans trades, ask your own best
-dispatch question — do not force the job into a listed type.
-Set next_question to null when a dispatcher could search and brief a provider, including
-when the hints say no catalog slots remain.
+A short optional "intake hints" block may appear after a trade is known. It lists
+example jobs for that trade. It is not a match, not a script, and not a diagnosis.
+You decide from the conversation what is already answered; a single word does not
+fill every slot. If hints are present and one example clearly fits, prefer one
+unanswered high-priority question, rephrased naturally.
+If no hints apply, or the job is unusual, ambiguous, or spans trades, ask your own
+best dispatch question — do not force the job into a listed type.
+Set next_question to null when a dispatcher could search and brief a provider.
 Never ask for city, ZIP, name, phone, email, or any address.
 Prioritize safety-relevant missing details, then dispatch details.
 If the user described an emergency (gas, fire, CO), set the matching hazard and urgency emergency.
@@ -167,43 +169,14 @@ def fallback_analysis(user_text: str, history: list[ChatMessage] | None = None) 
             confidence = 0.75
             break
 
-    urgency = Urgency.flexible
-    urgency_reason = "Not enough information to judge timing."
-    if any(bit in lowered for bit in (
-        "flood", "spark", "gas leak", "smell gas", "smells like gas",
-        "on fire", "carbon monoxide", "no cooling", "not cooling",
-    )):
-        urgency = Urgency.same_day
-        urgency_reason = "The description suggests a problem that should be addressed soon."
-    if any(bit in lowered for bit in (
-        "flood", "spark", "gas leak", "smell gas", "on fire", "carbon monoxide",
-    )):
-        urgency = Urgency.emergency
-        urgency_reason = "The description includes an urgent or hazardous signal."
-    elif any(bit in lowered for bit in (
-        "leak", "clog", "no hot water", "this morning", "overflow",
-        "last night", "right now", "90 degree",
-    )):
-        urgency = Urgency.same_day
-        urgency_reason = "The description suggests a problem that should be addressed soon."
+    urgency, urgency_reason = _urgency_from_text(lowered)
 
     summary = blob.strip() or user_text.strip()
     if len(summary) > 280:
         summary = summary[:277] + "..."
 
-    from app.intake_catalog import match_problem, unanswered_questions
-
-    problem = match_problem(category, blob)
-    remaining = unanswered_questions(problem, facts={}, asked=[], blob=blob)
-    if remaining:
-        next_question = remaining[0].question
-        missing_details = [item.collects for item in remaining]
-    elif problem is not None:
-        next_question = None
-        missing_details = []
-    else:
-        next_question = _fallback_question(category)
-        missing_details = ["problem details"]
+    next_question = _fallback_question(category)
+    missing_details = ["problem details"]
     return LLMAnalysis(
         service_category=category,
         category_confidence=confidence,
@@ -256,11 +229,38 @@ def _complete(client: OpenAI, messages: list[dict], use_json_mode: bool) -> str:
     return content
 
 
+def _urgency_from_text(lowered: str) -> tuple[Urgency, str]:
+    urgency = Urgency.flexible
+    urgency_reason = "Not enough information to judge timing."
+    if any(bit in lowered for bit in (
+        "flood", "spark", "gas leak", "smell gas", "smells like gas",
+        "on fire", "carbon monoxide", "no cooling", "not cooling",
+    )):
+        urgency = Urgency.same_day
+        urgency_reason = "The description suggests a problem that should be addressed soon."
+    if any(bit in lowered for bit in (
+        "flood", "spark", "gas leak", "smell gas", "on fire", "carbon monoxide",
+    )):
+        urgency = Urgency.emergency
+        urgency_reason = "The description includes an urgent or hazardous signal."
+    elif any(bit in lowered for bit in (
+        "leak", "clog", "no hot water", "this morning", "overflow",
+        "last night", "right now", "90 degree",
+    )):
+        urgency = Urgency.same_day
+        urgency_reason = "The description suggests a problem that should be addressed soon."
+    return urgency, urgency_reason
+
+
 def analyze(
     history: list[ChatMessage],
     intake_guidance: str | None = None,
 ) -> tuple[LLMAnalysis, bool]:
-    """Return (analysis, used_fallback)."""
+    """Return (analysis, used_fallback).
+
+    DeepSeek always runs when configured. Keyword fallback is last resort
+    if the model is missing or returns invalid JSON.
+    """
     last_user = ""
     for message in reversed(history):
         if message.role == "user":

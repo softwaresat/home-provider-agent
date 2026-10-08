@@ -268,7 +268,8 @@ def test_stops_early_when_next_question_is_null(monkeypatch):
     agent.handle_location(session, "Austin, TX 78704")
     agent.handle_user_message(
         session,
-        "Kitchen sink has been leaking under the cabinet since this morning, still dripping.",
+        "Kitchen sink has been leaking under the cabinet since this morning, "
+        "still dripping. I can reach the shutoff.",
     )
     assert session.stage == Stage.showing_providers
     assert session.questions_asked == 0
@@ -373,11 +374,11 @@ def test_completed_lead_does_not_mutate_analysis(monkeypatch):
     assert "already complete" in session.messages[-1].content.lower()
 
 
-def test_analyze_receives_catalog_hints_for_known_problem(monkeypatch):
-    captured = {}
+def test_analyze_receives_catalog_hints_after_trade_is_known(monkeypatch):
+    captured = {"guidance": []}
 
     def fake_analyze(_history, intake_guidance=None, **_kwargs):
-        captured["guidance"] = intake_guidance
+        captured["guidance"].append(intake_guidance)
         return _analysis(
             next_question="Is water still leaking right now?",
             missing_details=["still_running"],
@@ -387,10 +388,12 @@ def test_analyze_receives_catalog_hints_for_known_problem(monkeypatch):
     session = agent.create_session("catalog-hint")
     agent.handle_location(session, "Austin, TX 78704")
     agent.handle_user_message(session, "A pipe is leaking in the house.")
-    assert captured["guidance"]
-    assert "leaking pipe or fixture" in captured["guidance"]
-    assert "still_running" in captured["guidance"]
-    assert "Ask at most ONE question" in captured["guidance"]
+    assert captured["guidance"][0] is None
+    agent.handle_user_message(session, "It is still dripping under the sink.")
+    second = captured["guidance"][1]
+    assert second
+    assert "leaking pipe or fixture" in second
+    assert "Ask at most ONE question" in second
 
 
 def test_analyze_gets_no_catalog_hints_for_uncovered_problem(monkeypatch):
@@ -411,6 +414,31 @@ def test_analyze_gets_no_catalog_hints_for_uncovered_problem(monkeypatch):
         "My smart lock randomly unlocks at 2am and the keypad is dead.",
     )
     assert captured["guidance"] is None
+
+
+def test_nonsensical_answer_does_not_end_intake(monkeypatch):
+    _stub_places(monkeypatch)
+    turns = {"n": 0}
+
+    def fake_analyze(_history, **_kwargs):
+        turns["n"] += 1
+        if turns["n"] == 1:
+            return _analysis(next_question="Is water still leaking right now?"), False
+        return _analysis(next_question=None, missing_details=[]), False
+
+    monkeypatch.setattr("app.llm.analyze", fake_analyze)
+    session = agent.create_session("idk-sink")
+    agent.handle_location(session, "Austin, TX 78704")
+    agent.handle_user_message(session, "my sink is leaking")
+    assert session.stage == Stage.gathering
+    first = session.messages[-1].content.lower()
+    agent.handle_user_message(session, "idk")
+    assert session.stage == Stage.gathering
+    assert session.questions_asked >= 2
+    assert session.providers == []
+    second = session.messages[-1].content.lower()
+    assert "enough to search" not in second
+    assert second != first
 
 
 def test_header_location_does_not_abort_gathering(monkeypatch):

@@ -1,43 +1,66 @@
 from app.intake_catalog import (
+    PROBLEMS,
     already_asked,
-    match_problem,
+    problem_by_id,
+    problems_for_category,
     turn_guidance,
     unanswered_questions,
 )
 from app.models import ServiceCategory
 
 
-def test_match_leaking_sink():
-    problem = match_problem(
-        ServiceCategory.unknown,
-        "My kitchen sink has been leaking under the cabinet since this morning.",
-    )
+def test_catalog_entries_are_complete():
+    assert 30 <= len(PROBLEMS) <= 45
+    for problem in PROBLEMS:
+        assert problem.description.strip()
+        assert len(problem.examples) >= 2
+        assert 2 <= len(problem.questions) <= 4
+        cats = {item.priority for item in problem.questions}
+        assert min(cats) <= 1
+
+
+def test_no_hints_until_a_trade_is_known():
+    assert turn_guidance(ServiceCategory.unknown, "My kitchen sink is leaking.") is None
+
+
+def test_plumbing_hints_list_example_jobs_not_a_match():
+    guidance = turn_guidance(ServiceCategory.plumbing, facts={}, asked=[])
+    assert guidance is not None
+    assert "not a diagnosis" in guidance
+    assert "leaking pipe or fixture" in guidance
+    assert "clogged drain" in guidance
+    assert "Ask at most ONE question" in guidance
+
+
+def test_unanswered_skips_only_llm_facts_not_keywords_in_text():
+    problem = problem_by_id("leaking_fixture")
     assert problem is not None
-    assert problem.id == "leaking_fixture"
-    assert problem.category == ServiceCategory.plumbing
+    blob_facts = unanswered_questions(problem, facts={}, asked=[])
+    collects = {item.collects for item in blob_facts}
+    assert "still_running" in collects
+    assert "location" in collects
+    assert "shutoff_access" in collects
 
-
-def test_unanswered_skips_details_already_in_text():
-    blob = (
-        "My kitchen sink has been leaking under the cabinet since this morning. "
-        "It's still dripping. I can turn off the valve under the sink."
+    remaining = unanswered_questions(
+        problem,
+        facts={
+            "still_running": "yes, dripping",
+            "location": "kitchen sink",
+        },
+        asked=[],
     )
-    problem = match_problem(ServiceCategory.plumbing, blob)
-    remaining = unanswered_questions(problem, facts={}, asked=[], blob=blob)
     collects = {item.collects for item in remaining}
     assert "still_running" not in collects
     assert "location" not in collects
-    assert "shutoff_access" not in collects
+    assert "shutoff_access" in collects
 
 
-def test_unanswered_skips_known_facts_and_asked_questions():
-    blob = "The pipe is leaking."
-    problem = match_problem(ServiceCategory.plumbing, blob)
+def test_unanswered_skips_asked_questions():
+    problem = problem_by_id("leaking_fixture")
     remaining = unanswered_questions(
         problem,
         facts={"still_running": "yes, dripping"},
         asked=["Which fixture is leaking, and which room is it in?"],
-        blob=blob,
     )
     collects = [item.collects for item in remaining]
     assert "still_running" not in collects
@@ -52,60 +75,30 @@ def test_already_asked_treats_paraphrase_as_redundant():
     )
 
 
-def test_uncovered_problem_has_no_guidance():
-    text = "My smart lock randomly unlocks at 2am and the keypad is dead."
-    assert match_problem(ServiceCategory.unknown, text) is None
-    assert turn_guidance(ServiceCategory.unknown, text, facts={}, asked=[]) is None
-    assert unanswered_questions(None, blob=text) == []
-
-
-def test_ambiguous_unknown_does_not_force_a_type():
-    assert match_problem(ServiceCategory.unknown, "Something is wrong with the house.") is None
-
-
-def test_guidance_lists_only_remaining_slots():
-    blob = "There is a leaking pipe in the basement."
-    guidance = turn_guidance(ServiceCategory.plumbing, blob, facts={}, asked=[])
+def test_guidance_omits_slots_the_llm_already_extracted():
+    guidance = turn_guidance(
+        ServiceCategory.plumbing,
+        facts={"location": "basement pipe"},
+        asked=[],
+    )
     assert guidance is not None
-    assert "leaking pipe or fixture" in guidance
-    assert "still_running" in guidance
-    assert "Ask at most ONE question" in guidance
-    # Location is already in the blob (basement).
-    assert "- [dispatch] location:" not in guidance
+    assert "Which fixture is leaking, and which room is it in?" not in guidance
+    assert "Is water still leaking right now?" in guidance
 
 
-def test_want_does_not_match_pest_catalog():
-    text = "I want someone to look at my kitchen sink. It has been leaking."
-    problem = match_problem(ServiceCategory.unknown, text)
-    assert problem is not None
-    assert problem.category == ServiceCategory.plumbing
-    assert problem.id != "indoor_pest"
-
-
-def test_common_jobs_match_a_type():
-    cases = [
-        ("The downstairs toilet will not flush.", "toilet_issue", ServiceCategory.plumbing),
-        ("The garbage disposal is humming and jammed.", "garbage_disposal", ServiceCategory.plumbing),
-        ("Sewage is backing up through the floor drain.", "sewer_or_sump", ServiceCategory.plumbing),
-        ("The garage door opener stopped halfway down.", "general_home_repair", ServiceCategory.handyman),
-        ("We have bed bugs in the mattress.", "indoor_pest", ServiceCategory.pest_control),
-        ("A gutter is pulling off after hail.", "roof_leak", ServiceCategory.roofing),
-        ("The dishwasher won't start and shows an error.", "broken_appliance", ServiceCategory.appliance_repair),
-    ]
-    for text, problem_id, category in cases:
-        problem = match_problem(ServiceCategory.unknown, text)
-        assert problem is not None, text
-        assert problem.id == problem_id, text
-        assert problem.category == category, text
-
-
-def test_niche_jobs_still_left_to_the_model():
-    niche = [
-        "The pool pump is making a grinding noise.",
-        "I need a Level 2 EV charger installed in the garage.",
-        "Our septic alarm is beeping.",
-        "The solar inverter shows a red fault light.",
+def test_handyman_hints_do_not_depend_on_user_keywords():
+    guidance = turn_guidance(
+        ServiceCategory.handyman,
         "My smart lock randomly unlocks at 2am and the keypad is dead.",
-    ]
-    for text in niche:
-        assert match_problem(ServiceCategory.unknown, text) is None, text
+        facts={},
+        asked=[],
+    )
+    assert guidance is not None
+    assert "garage door" in guidance
+    assert "ignore these hints" in guidance.lower() or "unusual" in guidance.lower()
+
+
+def test_problems_for_category_stays_in_trade():
+    plumbing = problems_for_category(ServiceCategory.plumbing)
+    assert plumbing
+    assert all(item.category == ServiceCategory.plumbing for item in plumbing)

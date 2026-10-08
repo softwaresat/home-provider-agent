@@ -254,6 +254,18 @@ def _usable_chat_question(session: SessionState, allow_fallback: bool) -> Option
     return fallback
 
 
+def _last_user_content(session: SessionState) -> str:
+    for message in reversed(session.messages):
+        if message.role == "user":
+            return message.content or ""
+    return ""
+
+
+def _reply_too_thin_to_search(text: str) -> bool:
+    words = re.findall(r"[a-z0-9]+", (text or "").lower())
+    return len(words) <= 2
+
+
 def _ask_followup(session: SessionState, question: str, spoken: Optional[str] = None) -> None:
     session.questions_asked += 1
     session.asked_questions.append(question)
@@ -385,9 +397,12 @@ def _continue_intake(session: SessionState) -> None:
         _prompt_location_field(session)
         return
 
-    # Fallback questions only help when the category is still unknown.
-    # If the model set next_question to null and we can search, stop early.
-    allow_fallback = not category_ready(session)
+    # Do not search after a shrug like "idk". Catalog slots are hints for the
+    # LLM, not a checklist Python walks when the model returns null.
+    allow_fallback = (
+        not category_ready(session)
+        or _reply_too_thin_to_search(_last_user_content(session))
+    )
     question = None if at_cap else _usable_chat_question(session, allow_fallback=allow_fallback)
 
     if question:
@@ -441,14 +456,8 @@ def handle_user_message(session: SessionState, text: str) -> SessionState:
         )
         return session
 
-    blob = intake_catalog.conversation_blob(
-        session.messages,
-        facts=session.analysis.facts if session.analysis else None,
-        summary=session.analysis.problem_summary if session.analysis else "",
-    )
     guidance = intake_catalog.turn_guidance(
         effective_category(session),
-        blob,
         facts=session.analysis.facts if session.analysis else None,
         asked=session.asked_questions,
     )
