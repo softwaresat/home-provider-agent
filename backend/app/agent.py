@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Optional
 
-from app import lead as lead_mod
+from app import intake_catalog, lead as lead_mod
 from app import llm, places, ranking, safety
 from app.models import (
     CAUTION_HAZARDS,
@@ -441,7 +441,18 @@ def handle_user_message(session: SessionState, text: str) -> SessionState:
         )
         return session
 
-    analysis, used_fallback = llm.analyze(session.messages)
+    blob = intake_catalog.conversation_blob(
+        session.messages,
+        facts=session.analysis.facts if session.analysis else None,
+        summary=session.analysis.problem_summary if session.analysis else "",
+    )
+    guidance = intake_catalog.turn_guidance(
+        effective_category(session),
+        blob,
+        facts=session.analysis.facts if session.analysis else None,
+        asked=session.asked_questions,
+    )
+    analysis, used_fallback = llm.analyze(session.messages, intake_guidance=guidance)
     if used_fallback:
         session.llm_fallback_used = True
 

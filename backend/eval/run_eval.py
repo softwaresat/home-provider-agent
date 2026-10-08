@@ -219,7 +219,7 @@ def render_results(rows: list[dict], record_note: str) -> str:
     lines = [
         "# Prototype evaluation results",
         "",
-        "Ten **real-life edge cases**, measured live against this prototype.",
+        f"{len(rows)} scripted scenarios (obvious catalog jobs and edge cases), measured live against this prototype.",
         "",
         "- **Funnel completion** = the scenario reached a `complete` lead. The script answers",
         "  follow-ups from a fixed list, auto-selects the top-ranked listing, and submits",

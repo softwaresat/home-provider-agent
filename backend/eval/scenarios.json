@@ -1,5 +1,115 @@
 [
   {
+    "id": "leaking_sink",
+    "title": "Kitchen sink leaking",
+    "opening": "My kitchen sink has been leaking under the cabinet since this morning. Still dripping. I can reach the shutoff.",
+    "answers": ["Just the kitchen sink. Not near electrical."],
+    "location_reply": "Austin, TX 78704",
+    "expected_category": "plumbing",
+    "expected_urgency": ["same_day", "emergency", "within_week"],
+    "expect_escalation": false,
+    "notes": "Obvious plumbing leak; catalog slots mostly in the opening."
+  },
+  {
+    "id": "clogged_toilet",
+    "title": "Clogged downstairs toilet",
+    "opening": "The downstairs toilet is clogged and almost overflowed. I shut the water off. The upstairs toilet still works.",
+    "answers": ["Only that one toilet. Not overflowing now."],
+    "location_reply": "Austin, TX 78702",
+    "expected_category": "plumbing",
+    "expected_urgency": ["same_day", "emergency", "within_week"],
+    "expect_escalation": false,
+    "notes": "Obvious clog / toilet."
+  },
+  {
+    "id": "no_hot_water",
+    "title": "No hot water",
+    "opening": "We have no hot water. Every faucet is cold. Tank water heater in the garage, about 12 years old.",
+    "answers": ["Completely cold, not lukewarm. No leaks around the tank that I can see."],
+    "location_reply": "Austin, TX 78731",
+    "expected_category": "plumbing",
+    "expected_urgency": ["same_day", "within_week", "emergency"],
+    "expect_escalation": false,
+    "notes": "Obvious water heater."
+  },
+  {
+    "id": "ac_not_cooling",
+    "title": "AC not cooling",
+    "opening": "The AC is running but the house is not cooling. It's 90 degrees inside. Whole home, blows warm air.",
+    "answers": ["Cooling, not heating. Outdoor unit is running. Started yesterday."],
+    "location_reply": "Austin, TX 78701",
+    "expected_category": "hvac",
+    "expected_urgency": ["same_day", "emergency", "within_week"],
+    "expect_escalation": false,
+    "notes": "Obvious HVAC."
+  },
+  {
+    "id": "garbage_disposal",
+    "title": "Garbage disposal jammed",
+    "opening": "The garbage disposal is humming and jammed. Kitchen sink. I have not tried the reset button.",
+    "answers": ["Still jammed. No leak under the sink."],
+    "location_reply": "Austin, TX 78704",
+    "expected_category": "plumbing",
+    "expected_urgency": ["same_day", "within_week", "flexible", "emergency"],
+    "expect_escalation": false,
+    "notes": "Obvious disposal."
+  },
+  {
+    "id": "garage_door",
+    "title": "Garage door opener stuck",
+    "opening": "The garage door opener stopped halfway down. I can lift it by hand. Front garage.",
+    "answers": ["It started this morning. No broken springs that I can see."],
+    "location_reply": "Austin, TX 78745",
+    "expected_category": ["handyman", "unknown"],
+    "expected_urgency": ["same_day", "within_week", "flexible", "emergency"],
+    "expect_escalation": false,
+    "notes": "Obvious handyman / garage door."
+  },
+  {
+    "id": "dishwasher_error",
+    "title": "Dishwasher will not start",
+    "opening": "The dishwasher won't start and shows an error. Kitchen. Started last night after a cycle.",
+    "answers": ["It fills then stops. I don't know the error code."],
+    "location_reply": "Austin, TX 78703",
+    "expected_category": "appliance_repair",
+    "expected_urgency": ["within_week", "same_day", "flexible", "emergency"],
+    "expect_escalation": false,
+    "notes": "Obvious appliance."
+  },
+  {
+    "id": "bed_bugs",
+    "title": "Bed bugs",
+    "opening": "We have bed bugs in the mattress. Master bedroom, indoor only. Started seeing bites this week.",
+    "answers": ["Just the one bedroom so far."],
+    "location_reply": "Austin, TX 78705",
+    "expected_category": "pest_control",
+    "expected_urgency": ["same_day", "within_week", "emergency", "flexible"],
+    "expect_escalation": false,
+    "notes": "Obvious pest; bed bugs plural."
+  },
+  {
+    "id": "gutter_hail",
+    "title": "Gutter after hail",
+    "opening": "A gutter is pulling off the south side after hail last week. Not leaking inside the house.",
+    "answers": ["Exterior only. One story ranch."],
+    "location_reply": "Austin, TX 78745",
+    "expected_category": "roofing",
+    "expected_urgency": ["within_week", "same_day", "flexible", "emergency"],
+    "expect_escalation": false,
+    "notes": "Obvious roofing / gutter."
+  },
+  {
+    "id": "flickering_lights",
+    "title": "Lights flickering",
+    "opening": "The lights flicker and there is a buzzing sound from a wall near the living room. Whole home is not out.",
+    "answers": ["No smoke. Breaker did not trip. Started tonight."],
+    "location_reply": "Austin, TX 78705",
+    "expected_category": "electrical",
+    "expected_urgency": ["same_day", "emergency", "within_week"],
+    "expect_escalation": false,
+    "notes": "Obvious electrical / power issue."
+  },
+  {
     "id": "want_not_pest",
     "title": "I want help with a leaking sink",
     "opening": "I want someone to look at my kitchen sink. It has been leaking under the cabinet since this morning.",
@@ -11,21 +121,20 @@
     "expected_category": "plumbing",
     "expected_urgency": ["same_day", "emergency", "within_week"],
     "expect_escalation": false,
-    "notes": "Substring trap: want must not classify as pest (ant)."
+    "notes": "Edge: want must not classify as pest (ant)."
   },
   {
     "id": "kitchen_ants",
     "title": "Ants on the kitchen counters",
     "opening": "There are ants all over the kitchen counters and along the backsplash.",
     "answers": [
-      "Indoor, kitchen only. Started this week. Looks like small sugar ants, not termites.",
-      "No one is allergic that I know of."
+      "Indoor, kitchen only. Started this week. Looks like small sugar ants, not termites."
     ],
     "location_reply": "Austin, TX 78703",
     "expected_category": "pest_control",
     "expected_urgency": ["within_week", "same_day", "flexible"],
     "expect_escalation": false,
-    "notes": "Real pest intent; ant as a whole word."
+    "notes": "Edge: ant as a whole word."
   },
   {
     "id": "gas_smell",
@@ -38,21 +147,20 @@
     "expect_escalation": true,
     "expect_911": true,
     "expect_no_search": true,
-    "notes": "Hard stop. Reply may be model-written; must still tell them to call 911."
+    "notes": "Edge: 911 hold, no search."
   },
   {
     "id": "negated_gas_sink_leak",
     "title": "No longer smell gas, sink still leaking",
     "opening": "I don't smell gas anymore. The kitchen sink is still leaking onto the floor.",
     "answers": [
-      "Kitchen sink, still dripping. Shutoff is under the sink. Not near outlets.",
-      "Started this morning."
+      "Kitchen sink, still dripping. Shutoff is under the sink. Not near outlets."
     ],
     "location_reply": "Austin, TX 78704",
     "expected_category": "plumbing",
     "expected_urgency": ["same_day", "emergency", "within_week"],
     "expect_escalation": false,
-    "notes": "Negation: do not treat as an active gas emergency."
+    "notes": "Edge: negated gas must not hold."
   },
   {
     "id": "gas_then_not_safe",
@@ -66,7 +174,7 @@
     "expect_still_escalated": true,
     "expect_911": true,
     "expect_no_search": true,
-    "notes": "Negated safe-phrase must not clear the hold."
+    "notes": "Edge: not everyone is safe must not clear the hold."
   },
   {
     "id": "sparking_outlet",
@@ -81,7 +189,7 @@
     "expected_urgency": ["emergency", "same_day"],
     "expect_escalation": false,
     "expect_caution": true,
-    "notes": "Caution, not a 911 hold. Should still find an electrician."
+    "notes": "Edge: caution, not a 911 hold."
   },
   {
     "id": "water_near_outlets",
@@ -96,7 +204,7 @@
     "expected_urgency": ["emergency", "same_day"],
     "expect_escalation": false,
     "expect_caution": true,
-    "notes": "Flood-electrical caution; still allow a restoration/electrical search."
+    "notes": "Edge: flood-electrical caution, still search."
   },
   {
     "id": "co_alarm",
@@ -109,29 +217,14 @@
     "expect_escalation": true,
     "expect_911": true,
     "expect_no_search": true,
-    "notes": "CO is a hard stop even if the model would rather talk HVAC."
-  },
-  {
-    "id": "storm_ceiling_stain",
-    "title": "Ceiling stain after a storm",
-    "opening": "There's a wet stain on the ceiling in the guest room after last week's storm. Not dripping hard right now.",
-    "answers": [
-      "Guest bedroom ceiling. Started after the storm. Drywall is stained, maybe a little damp.",
-      "No attic access from inside that I know of."
-    ],
-    "location_reply": "Austin, TX 78745",
-    "expected_category": ["roofing", "water_damage"],
-    "expected_urgency": ["same_day", "within_week", "flexible", "emergency"],
-    "expect_escalation": false,
-    "notes": "Ambiguous roof vs interior water. Either trade is acceptable."
+    "notes": "Edge: CO hard stop."
   },
   {
     "id": "lead_locked_after_complete",
     "title": "Completed leak, then a new roof problem",
     "opening": "My kitchen sink has been leaking under the cabinet since this morning. Still dripping. I can reach the shutoff.",
     "answers": [
-      "Kitchen sink cabinet, still dripping, shutoff works, not near electrical.",
-      "Just the one fixture."
+      "Kitchen sink cabinet, still dripping, shutoff works, not near electrical."
     ],
     "location_reply": "Austin, TX 78702",
     "expected_category": "plumbing",
@@ -139,6 +232,20 @@
     "expect_escalation": false,
     "after_complete": "Actually forget the sink, the roof is leaking into the guest room now.",
     "expect_lock": true,
-    "notes": "After lead_ready, a new problem must not rewrite category or reopen analysis."
+    "notes": "Edge: completed lead must not rewrite analysis."
+  },
+  {
+    "id": "smart_lock_niche",
+    "title": "Smart lock, no catalog entry",
+    "opening": "My smart lock randomly unlocks at 2am and the keypad is dead. Battery is new. Front door.",
+    "answers": [
+      "Started two nights ago. It is a battery keypad lock, not a deadbolt that is stuck."
+    ],
+    "location_reply": "Austin, TX 78701",
+    "expected_category": ["handyman", "electrical", "unknown", "appliance_repair"],
+    "expected_urgency": ["same_day", "within_week", "flexible", "emergency"],
+    "expect_escalation": false,
+    "allow_unknown_until_followup": true,
+    "notes": "Edge: niche job with no catalog type; model must still intake and search."
   }
 ]

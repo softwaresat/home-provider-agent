@@ -36,20 +36,14 @@ Valid hazards: gas_leak, fire_smoke, electrical, flood_electrical, carbon_monoxi
 
 Question guidance — ask only what is still missing; never ask two questions; never repeat:
 Keep asking while important dispatch or safety details are missing. Do not stop after
-one question if the job is still vague. Messy jobs may need several turns (what is
-broken, where in the home, whether it is still happening, access, shutoff, storm, etc.).
-Set next_question to null only when a dispatcher could search and brief a provider.
+one question if the job is still vague.
+A short optional "intake hints" block may appear for this turn. It is guidance, not a script.
+If hints are present, prefer an unanswered high-priority slot, rephrased naturally.
+If no hints apply, or the job is unusual, ambiguous, or spans trades, ask your own best
+dispatch question — do not force the job into a listed type.
+Set next_question to null when a dispatcher could search and brief a provider, including
+when the hints say no catalog slots remain.
 Never ask for city, ZIP, name, phone, email, or any address.
-- Plumbing: where in the home, which fixture, whether it is still running, shutoff access
-- HVAC: heating vs cooling, whether the unit is completely nonfunctional, thermostat/error
-- Electrical: sparking, smoke, burning smell (safety), which room/circuit
-- Roofing: leak location in the home, whether a recent storm caused it, interior dripping
-- Water damage: source if known, still entering, near electrical equipment, which rooms
-- Pest: type of pest if known, indoor vs outdoor, where seen
-- Appliance: which appliance, what happens when they use it, age/error if known
-- Vague: what they noticed, which part of the home, whether it is ongoing
-- Access: crawlspace, locked gate, occupied unit — only if it would change dispatch
-
 Prioritize safety-relevant missing details, then dispatch details.
 If the user described an emergency (gas, fire, CO), set the matching hazard and urgency emergency.
 """
@@ -197,7 +191,19 @@ def fallback_analysis(user_text: str, history: list[ChatMessage] | None = None) 
     if len(summary) > 280:
         summary = summary[:277] + "..."
 
-    next_question = _fallback_question(category)
+    from app.intake_catalog import match_problem, unanswered_questions
+
+    problem = match_problem(category, blob)
+    remaining = unanswered_questions(problem, facts={}, asked=[], blob=blob)
+    if remaining:
+        next_question = remaining[0].question
+        missing_details = [item.collects for item in remaining]
+    elif problem is not None:
+        next_question = None
+        missing_details = []
+    else:
+        next_question = _fallback_question(category)
+        missing_details = ["problem details"]
     return LLMAnalysis(
         service_category=category,
         category_confidence=confidence,
@@ -206,7 +212,7 @@ def fallback_analysis(user_text: str, history: list[ChatMessage] | None = None) 
         problem_summary=summary or "Home problem reported.",
         facts={},
         next_question=next_question,
-        missing_details=["location", "problem details"],
+        missing_details=missing_details,
     )
 
 
@@ -250,7 +256,10 @@ def _complete(client: OpenAI, messages: list[dict], use_json_mode: bool) -> str:
     return content
 
 
-def analyze(history: list[ChatMessage]) -> tuple[LLMAnalysis, bool]:
+def analyze(
+    history: list[ChatMessage],
+    intake_guidance: str | None = None,
+) -> tuple[LLMAnalysis, bool]:
     """Return (analysis, used_fallback)."""
     last_user = ""
     for message in reversed(history):
@@ -263,6 +272,8 @@ def analyze(history: list[ChatMessage]) -> tuple[LLMAnalysis, bool]:
         return fallback_analysis(last_user, history), True
 
     api_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    if intake_guidance:
+        api_messages.append({"role": "system", "content": intake_guidance})
     for message in history:
         if message.role in {"user", "assistant"}:
             api_messages.append({"role": message.role, "content": message.content})

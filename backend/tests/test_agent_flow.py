@@ -67,7 +67,7 @@ def test_gas_smell_escalates_without_search(monkeypatch):
         called["search"] = True
         return [], "google_places", None
 
-    def fake_analyze(_history):
+    def fake_analyze(_history, **_kwargs):
         called["analyze"] = True
         raise AssertionError("gas emergency must not run intake analysis")
 
@@ -117,7 +117,7 @@ def test_happy_path_completes_lead_with_stubbed_places(monkeypatch):
     )
     turns = {"n": 0}
 
-    def fake_analyze(_history):
+    def fake_analyze(_history, **_kwargs):
         turns["n"] += 1
         if turns["n"] == 1:
             return _analysis(
@@ -232,7 +232,7 @@ def test_keeps_asking_high_value_followups(monkeypatch):
     ]
     call = {"n": 0}
 
-    def fake_analyze(_history):
+    def fake_analyze(_history, **_kwargs):
         question = questions[min(call["n"], len(questions) - 1)]
         call["n"] += 1
         return _analysis(next_question=question), False
@@ -260,7 +260,7 @@ def test_keeps_asking_high_value_followups(monkeypatch):
 def test_stops_early_when_next_question_is_null(monkeypatch):
     _stub_places(monkeypatch)
 
-    def fake_analyze(_history):
+    def fake_analyze(_history, **_kwargs):
         return _analysis(next_question=None, missing_details=[]), False
 
     monkeypatch.setattr("app.llm.analyze", fake_analyze)
@@ -278,7 +278,7 @@ def test_stops_early_when_next_question_is_null(monkeypatch):
 def test_skips_contact_and_city_questions_in_chat(monkeypatch):
     _stub_places(monkeypatch)
 
-    def fake_analyze(_history):
+    def fake_analyze(_history, **_kwargs):
         return _analysis(next_question="What is your name and phone number?"), False
 
     monkeypatch.setattr("app.llm.analyze", fake_analyze)
@@ -291,7 +291,7 @@ def test_skips_contact_and_city_questions_in_chat(monkeypatch):
     assert session.stage == Stage.showing_providers
     assert session.questions_asked == 0
 
-    def fake_city(_history):
+    def fake_city(_history, **_kwargs):
         return _analysis(next_question="What city or ZIP code are you in?"), False
 
     monkeypatch.setattr("app.llm.analyze", fake_city)
@@ -307,7 +307,7 @@ def test_high_followup_cap_then_searches(monkeypatch):
     _stub_places(monkeypatch)
     call = {"n": 0}
 
-    def fake_analyze(_history):
+    def fake_analyze(_history, **_kwargs):
         call["n"] += 1
         return _analysis(
             next_question=f"What access constraint number {call['n']} should dispatch know?"
@@ -340,7 +340,7 @@ def test_location_change_replaces_stale_zip():
 def test_completed_lead_does_not_mutate_analysis(monkeypatch):
     _stub_places(monkeypatch)
 
-    def fake_analyze(_history):
+    def fake_analyze(_history, **_kwargs):
         return _analysis(next_question=None, missing_details=[]), False
 
     monkeypatch.setattr("app.llm.analyze", fake_analyze)
@@ -362,7 +362,7 @@ def test_completed_lead_does_not_mutate_analysis(monkeypatch):
     summary = session.analysis.problem_summary
     category = session.analysis.service_category
 
-    def boom(_history):
+    def boom(_history, **_kwargs):
         raise AssertionError("completed leads must not call the LLM")
 
     monkeypatch.setattr("app.llm.analyze", boom)
@@ -373,10 +373,50 @@ def test_completed_lead_does_not_mutate_analysis(monkeypatch):
     assert "already complete" in session.messages[-1].content.lower()
 
 
+def test_analyze_receives_catalog_hints_for_known_problem(monkeypatch):
+    captured = {}
+
+    def fake_analyze(_history, intake_guidance=None, **_kwargs):
+        captured["guidance"] = intake_guidance
+        return _analysis(
+            next_question="Is water still leaking right now?",
+            missing_details=["still_running"],
+        ), False
+
+    monkeypatch.setattr("app.llm.analyze", fake_analyze)
+    session = agent.create_session("catalog-hint")
+    agent.handle_location(session, "Austin, TX 78704")
+    agent.handle_user_message(session, "A pipe is leaking in the house.")
+    assert captured["guidance"]
+    assert "leaking pipe or fixture" in captured["guidance"]
+    assert "still_running" in captured["guidance"]
+    assert "Ask at most ONE question" in captured["guidance"]
+
+
+def test_analyze_gets_no_catalog_hints_for_uncovered_problem(monkeypatch):
+    captured = {}
+
+    def fake_analyze(_history, intake_guidance=None, **_kwargs):
+        captured["guidance"] = intake_guidance
+        return _analysis(
+            service_category=ServiceCategory.handyman,
+            next_question="What exactly is the lock doing, and when did it start?",
+        ), False
+
+    monkeypatch.setattr("app.llm.analyze", fake_analyze)
+    session = agent.create_session("no-catalog")
+    agent.handle_location(session, "Austin, TX 78704")
+    agent.handle_user_message(
+        session,
+        "My smart lock randomly unlocks at 2am and the keypad is dead.",
+    )
+    assert captured["guidance"] is None
+
+
 def test_header_location_does_not_abort_gathering(monkeypatch):
     _stub_places(monkeypatch)
 
-    def fake_analyze(_history):
+    def fake_analyze(_history, **_kwargs):
         return _analysis(
             next_question="Which fixture is leaking, and which room is it in?"
         ), False
