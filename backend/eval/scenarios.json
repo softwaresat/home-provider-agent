@@ -1,0 +1,131 @@
+[
+  {
+    "id": "basement_flooding",
+    "title": "Basement flooding",
+    "opening": "Water started coming into my basement last night after the storm. I don't know who to call.",
+    "answers": [
+      "It's seeping in along the foundation wall. Still coming in slowly. Not near any outlets.",
+      "Austin, TX 78704"
+    ],
+    "location_reply": "Austin, TX 78704",
+    "expected_category": "water_damage",
+    "expected_urgency": ["emergency", "same_day"],
+    "expect_escalation": false
+  },
+  {
+    "id": "leaking_sink",
+    "title": "Leaking sink",
+    "opening": "My kitchen sink has been leaking under the cabinet since this morning.",
+    "answers": [
+      "It's under the kitchen sink, still dripping, I can turn off the valve under the sink.",
+      "Austin, TX 78704"
+    ],
+    "location_reply": "Austin, TX 78704",
+    "expected_category": "plumbing",
+    "expected_urgency": ["same_day", "within_week", "emergency"],
+    "expect_escalation": false
+  },
+  {
+    "id": "ac_not_cooling",
+    "title": "AC not cooling",
+    "opening": "The AC is running but the house is not cooling. It's 90 degrees inside.",
+    "answers": [
+      "Cooling, not heating. The unit runs but blows warm air. Not completely dead.",
+      "Austin, TX 78701"
+    ],
+    "location_reply": "Austin, TX 78701",
+    "expected_category": "hvac",
+    "expected_urgency": ["same_day", "emergency", "within_week"],
+    "expect_escalation": false
+  },
+  {
+    "id": "roof_leak",
+    "title": "Roof leak",
+    "opening": "There's a wet stain on the ceiling in the guest room after last week's storm.",
+    "answers": [
+      "Guest bedroom ceiling. It started after the storm. Not dripping heavily right now.",
+      "Austin, TX 78745"
+    ],
+    "location_reply": "Austin, TX 78745",
+    "expected_category": "roofing",
+    "expected_urgency": ["same_day", "within_week", "flexible", "emergency"],
+    "expect_escalation": false
+  },
+  {
+    "id": "sparking_outlet",
+    "title": "Sparking outlet",
+    "opening": "The kitchen outlet is sparking when I plug in the toaster.",
+    "answers": [
+      "No smoke and no burning smell now, but it sparked. I stopped using it.",
+      "Austin, TX 78704"
+    ],
+    "location_reply": "Austin, TX 78704",
+    "expected_category": "electrical",
+    "expected_urgency": ["emergency", "same_day"],
+    "expect_escalation": false,
+    "expect_caution": true
+  },
+  {
+    "id": "clogged_toilet",
+    "title": "Clogged toilet",
+    "opening": "The downstairs toilet is clogged and won't drain. It almost overflowed.",
+    "answers": [
+      "Downstairs bathroom toilet. Not overflowing now. I shut the water off.",
+      "Austin, TX 78702"
+    ],
+    "location_reply": "Austin, TX 78702",
+    "expected_category": "plumbing",
+    "expected_urgency": ["same_day", "emergency", "within_week"],
+    "expect_escalation": false
+  },
+  {
+    "id": "broken_water_heater",
+    "title": "Broken water heater",
+    "opening": "We have no hot water. The water heater is about 12 years old.",
+    "answers": [
+      "Tank water heater in the garage. Completely cold water from every faucet.",
+      "Austin, TX 78731"
+    ],
+    "location_reply": "Austin, TX 78731",
+    "expected_category": "plumbing",
+    "expected_urgency": ["same_day", "within_week", "emergency"],
+    "expect_escalation": false
+  },
+  {
+    "id": "pest_infestation",
+    "title": "Pest infestation",
+    "opening": "I think we have a pest infestation. Seeing droppings in the pantry.",
+    "answers": [
+      "Looks like mice. Indoor, pantry and garage. Started a couple of weeks ago.",
+      "Austin, TX 78703"
+    ],
+    "location_reply": "Austin, TX 78703",
+    "expected_category": "pest_control",
+    "expected_urgency": ["within_week", "same_day", "flexible"],
+    "expect_escalation": false
+  },
+  {
+    "id": "vague_problem",
+    "title": "Vague home problem",
+    "opening": "Something is wrong with the house and I need someone to look at it.",
+    "answers": [
+      "There's a buzzing sound from a wall near the living room and the lights flicker.",
+      "Austin, TX 78705"
+    ],
+    "location_reply": "Austin, TX 78705",
+    "expected_category": ["electrical", "handyman", "unknown"],
+    "expected_urgency": ["same_day", "within_week", "flexible", "emergency"],
+    "expect_escalation": false,
+    "allow_unknown_until_followup": true
+  },
+  {
+    "id": "emergency_gas_smell",
+    "title": "Emergency gas smell",
+    "opening": "I smell gas in the kitchen. It started a few minutes ago.",
+    "answers": ["Everyone is outside. I'm safe."],
+    "location_reply": "Austin, TX 78704",
+    "expected_category": ["plumbing", "hvac", "unknown", "handyman"],
+    "expected_urgency": ["emergency", "same_day"],
+    "expect_escalation": true
+  }
+]
