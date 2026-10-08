@@ -1,5 +1,19 @@
+function StatusPill({ children, ok }) {
+  return (
+    <span
+      className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${
+        ok ? "bg-emerald-100 text-emerald-900" : "bg-amber-100 text-amber-950"
+      }`}
+    >
+      {children}
+    </span>
+  );
+}
+
 export default function ProviderCard({ provider, selected, onSelect }) {
   const fallback = provider.source === "fallback_fixture";
+  const tradeOk = Boolean(provider.trade_confirmed);
+  const contactOk = Boolean(provider.contactable || provider.phone || provider.website);
   return (
     <article className={`rounded-2xl border bg-white p-4 shadow-sm ${selected ? "border-moss ring-2 ring-moss/20" : "border-emerald-950/10"}`}>
       <div className="flex items-start justify-between gap-3">
@@ -10,8 +24,13 @@ export default function ProviderCard({ provider, selected, onSelect }) {
           </p>
         </div>
         <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${fallback ? "bg-amber-100 text-amber-900" : "bg-emerald-100 text-emerald-900"}`}>
-          {fallback ? "Fallback data" : "Google Places"}
+          {fallback ? "Fallback data" : "Listed business"}
         </span>
+      </div>
+      <div className="mt-2 flex flex-wrap gap-1">
+        <StatusPill ok={tradeOk}>{tradeOk ? "Relevant match" : "Trade unconfirmed"}</StatusPill>
+        <StatusPill ok={contactOk}>{contactOk ? "Contactable" : "No phone or website"}</StatusPill>
+        <StatusPill ok={false}>Availability unconfirmed</StatusPill>
       </div>
 
       {provider.address ? (

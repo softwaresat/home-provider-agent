@@ -84,6 +84,15 @@ def _append_assistant(session: SessionState, text: str) -> None:
     session.messages.append(ChatMessage(role="assistant", content=text))
 
 
+def _safety_copy(session: SessionState, user_text: str, mode: str) -> str:
+    """Python owns the hold. DeepSeek only writes the message."""
+    reply, used_fallback = llm.safety_reply(user_text, session.hazards, mode=mode)
+    if used_fallback:
+        session.llm_fallback_used = True
+    session.safety_advice = reply
+    return reply
+
+
 def _extract_location(text: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
     zip_code = None
     match = ZIP_RE.search(text or "")
@@ -103,34 +112,39 @@ def _extract_location(text: str) -> tuple[Optional[str], Optional[str], Optional
 
 
 def _apply_location(session: SessionState, city: Optional[str], zip_code: Optional[str], query: Optional[str]) -> None:
-    if city:
-        session.city = city
-    if zip_code:
-        session.zip_code = zip_code
+    incoming_city = (city or "").strip() or None
+    incoming_zip = (zip_code or "").strip() or None
+    if incoming_city:
+        city_changed = bool(session.city) and incoming_city.lower() != session.city.lower()
+        session.city = incoming_city
+        if city_changed and not incoming_zip:
+            session.zip_code = None
+    if incoming_zip:
+        session.zip_code = incoming_zip
     if query:
         session.location_query = query
-    elif session.city or session.zip_code:
+    else:
         session.location_query = location_label(session)
 
 
 def merge_analysis(session: SessionState, incoming: LLMAnalysis) -> None:
-    city, zip_code, query = _extract_location(
-        " ".join(m.content for m in session.messages if m.role == "user")
-    )
-    if incoming.city:
-        city = incoming.city
-    if incoming.zip_code:
-        zip_code = incoming.zip_code
-        if not query:
-            query = incoming.zip_code
-    _apply_location(session, city, zip_code, query)
+    # Header/explicit location wins. Do not re-merge stale city/ZIP from chat or the LLM.
+    if not (session.city or session.zip_code or session.location_query):
+        city, zip_code, query = _extract_location(
+            " ".join(m.content for m in session.messages if m.role == "user")
+        )
+        if incoming.city:
+            city = incoming.city
+        if incoming.zip_code:
+            zip_code = incoming.zip_code
+            if not query:
+                query = incoming.zip_code
+        _apply_location(session, city, zip_code, query)
 
     if session.analysis is None:
         merged = incoming.model_copy(deep=True)
-        if session.city:
-            merged.city = session.city
-        if session.zip_code:
-            merged.zip_code = session.zip_code
+        merged.city = session.city
+        merged.zip_code = session.zip_code
         session.analysis = merged
         return
 
@@ -151,14 +165,8 @@ def merge_analysis(session: SessionState, incoming: LLMAnalysis) -> None:
     for key, value in incoming.facts.items():
         if value:
             old.facts[key] = value
-    if incoming.city:
-        old.city = incoming.city
-    if incoming.zip_code:
-        old.zip_code = incoming.zip_code
-    if session.city:
-        old.city = session.city
-    if session.zip_code:
-        old.zip_code = session.zip_code
+    old.city = session.city
+    old.zip_code = session.zip_code
     old.missing_details = incoming.missing_details
     old.next_question = incoming.next_question
     incoming_hazards = {h.value: h for h in incoming.hazards}
@@ -293,22 +301,26 @@ def _providers_message(session: SessionState, preface: str) -> str:
 
 
 def apply_location_string(session: SessionState, location: str) -> None:
+    """Replace city/ZIP from an explicit location field. Do not keep stale parts."""
     text = (location or "").strip()
     if not text:
         return
     city, zip_code, query = _extract_location(text)
     if not city and not zip_code:
-        session.location_query = text
         if "," in text:
-            session.city = text.split(",", 1)[0].strip()
+            city = text.split(",", 1)[0].strip() or None
+            query = text
         else:
             zip_only = ZIP_RE.fullmatch(text)
             if zip_only:
-                session.zip_code = zip_only.group(1)
+                zip_code = zip_only.group(1)
+                query = zip_code
             else:
-                session.city = text
-    else:
-        _apply_location(session, city, zip_code, query or text)
+                city = text
+                query = text
+    session.city = city
+    session.zip_code = zip_code
+    session.location_query = query or text
     if session.analysis:
         session.analysis.city = session.city
         session.analysis.zip_code = session.zip_code
@@ -412,6 +424,23 @@ def handle_user_message(session: SessionState, text: str) -> SessionState:
     session.messages.append(ChatMessage(role="user", content=text))
 
     rule_hazards = safety.detect_hazards(text)
+    if safety.is_escalation(rule_hazards):
+        session.safety_cleared = False
+        merged_hazards = {h.value: h for h in (session.hazards + rule_hazards)}
+        session.hazards = list(merged_hazards.values())
+        session.stage = Stage.safety_escalated
+        lead_mod.apply_lead(session)
+        _append_assistant(session, _safety_copy(session, text, "escalate"))
+        return session
+
+    if prior_stage == Stage.lead_ready:
+        _append_assistant(
+            session,
+            "The lead is already complete. You can copy the draft email from the Lead tab. "
+            "Start a new lead if the problem changed. Nothing has been sent.",
+        )
+        return session
+
     analysis, used_fallback = llm.analyze(session.messages)
     if used_fallback:
         session.llm_fallback_used = True
@@ -422,10 +451,7 @@ def handle_user_message(session: SessionState, text: str) -> SessionState:
     elif session.stage == Stage.safety_escalated and safety.user_says_safe(text):
         session.safety_cleared = True
         session.stage = Stage.gathering
-        session.safety_advice = (
-            "Thanks for confirming you are safe. I can continue helping you find a provider. "
-            "I still will not diagnose the problem."
-        )
+        _safety_copy(session, text, "resume")
 
     merged_hazards = {h.value: h for h in (session.hazards + new_hazards)}
     session.hazards = list(merged_hazards.values())
@@ -441,26 +467,12 @@ def handle_user_message(session: SessionState, text: str) -> SessionState:
 
     if blocked_for_safety(session):
         session.stage = Stage.safety_escalated
-        session.safety_advice = safety.advice_for(session.hazards)
         lead_mod.apply_lead(session)
-        _append_assistant(
-            session,
-            session.safety_advice
-            + " If you have reached safety and still need a contractor, tell me you are safe.",
-        )
+        _append_assistant(session, _safety_copy(session, text, "escalate"))
         return session
 
-    caution = safety.advice_for(session.hazards)
-    if caution:
-        session.safety_advice = caution
-
-    if prior_stage == Stage.lead_ready:
-        _append_assistant(
-            session,
-            "The lead is already complete. You can copy the draft email from the Lead tab. "
-            "Select a different provider if you want to change it. Nothing has been sent.",
-        )
-        return session
+    if any(h in CAUTION_HAZARDS for h in new_hazards):
+        _safety_copy(session, text, "caution")
 
     if prior_stage == Stage.collecting_contact:
         lead_mod.apply_lead(session)
@@ -569,9 +581,20 @@ def handle_select(session: SessionState, place_id: str) -> SessionState:
     session.stage = Stage.collecting_contact
     lead_mod.apply_lead(session)
     why = ranking.match_explanation(match)
+    category = effective_category(session)
+    if not ranking.is_trade_match(match, category) or not ranking.is_contactable(match):
+        _append_assistant(
+            session,
+            f"Selected {match.name} as a Google listing. {why} "
+            "This is a provisional pick: trade match or a phone/website is missing, "
+            "so the lead cannot be marked complete until you choose a relevant, "
+            "contactable provider. Availability is unconfirmed either way.",
+        )
+        return session
     _append_assistant(
         session,
         f"Selected {match.name}. {why} "
+        "A Google listing is not a booking or a promise they will take the job. "
         "Next: add your name, a phone or email, the service address, and check consent "
         "on the Lead tab. I will draft an email but will not send it.",
     )

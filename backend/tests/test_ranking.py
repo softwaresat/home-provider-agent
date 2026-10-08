@@ -124,6 +124,32 @@ def test_out_of_area_phone_on_no_address_listing_is_flagged():
     assert not any("call center" in r for p in ranked if p.place_id != "n1" for r in p.match_reasons)
 
 
+def test_score_sets_trade_and_contact_flags():
+    plumber = score_provider(
+        _provider(primary_type="plumber", phone="512-555-0100"),
+        ServiceCategory.plumbing,
+        "Austin",
+        "78704",
+    )
+    bakery = score_provider(
+        _provider(
+            place_id="b1",
+            name="Austin Bakery",
+            primary_type="bakery",
+            phone=None,
+            website=None,
+            maps_url=None,
+        ),
+        ServiceCategory.plumbing,
+        "Austin",
+        "78704",
+    )
+    assert plumber.trade_confirmed is True
+    assert plumber.contactable is True
+    assert bakery.trade_confirmed is False
+    assert bakery.contactable is False
+
+
 def test_city_and_zip_in_address_add_geo_points():
     local = score_provider(
         _provider(address="123 Main St, Austin, TX 78704"),

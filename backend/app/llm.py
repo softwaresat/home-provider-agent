@@ -9,7 +9,7 @@ from typing import Optional
 from openai import OpenAI
 
 from app import config
-from app.models import ChatMessage, LLMAnalysis, ServiceCategory, Urgency
+from app.models import ChatMessage, Hazard, LLMAnalysis, ServiceCategory, Urgency
 
 SYSTEM_PROMPT = """You are an intake analyst for a home-services marketplace.
 You do NOT name, invent, or recommend businesses.
@@ -54,6 +54,46 @@ Prioritize safety-relevant missing details, then dispatch details.
 If the user described an emergency (gas, fire, CO), set the matching hazard and urgency emergency.
 """
 
+SAFETY_REPLY_PROMPT = """You write the in-chat message for a home-services intake agent after Python
+already classified a safety emergency. You do not decide whether it is actually dangerous.
+
+Rules:
+- Do NOT give repair, DIY, or diagnostic steps (no valves, sniff tests, "check the stove", mixing anything).
+- Do NOT name, invent, or recommend businesses.
+- Do NOT ask for name, phone, email, city, ZIP, or any address.
+- Do NOT use markdown, bullets, or a greeting.
+
+Write 3-6 short sentences in second person, calm, and specific to what the homeowner said.
+You MUST tell them to get to safety now, call 911 from a safe place, and that we will not
+look up contractors until they confirm everyone is safe.
+Return ONLY the message text.
+"""
+
+CAUTION_REPLY_PROMPT = """You write a short caution for a home-services intake agent.
+Python already flagged an electrical or water-near-electrical hazard. Contractor search may continue.
+
+Rules:
+- Do NOT give detailed DIY repair steps.
+- You MAY say to stay away from the hazard and call 911 if there is fire, smoke, or a shock.
+- Do NOT name or recommend businesses.
+- Do NOT ask for contact details or an address.
+
+Write 2-4 short sentences in second person, specific to what they said.
+Return ONLY the message text.
+"""
+
+RESUME_REPLY_PROMPT = """You write a short resume message after a homeowner confirmed they are safe.
+Python already cleared the emergency hold. Continue toward finding a contractor.
+
+Rules:
+- Do NOT diagnose or give repair steps.
+- Do NOT name businesses.
+- Acknowledge they are safe. Say you can keep helping find a provider.
+- Do not ask for name, phone, email, city, ZIP, or address.
+
+Write 2-3 short sentences. Return ONLY the message text.
+"""
+
 FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE | re.MULTILINE)
 
 # Keyword fallback is deterministic and used when the LLM is missing or malformed.
@@ -79,7 +119,7 @@ CATEGORY_KEYWORDS: list[tuple[ServiceCategory, tuple[str, ...]]] = [
         "wet stain", "ceiling leak", "gutter", "ceiling",
     )),
     (ServiceCategory.pest_control, (
-        "pest", "termite", "roach", "cockroach", "ant", "rodent",
+        "pest", "termite", "roach", "cockroach", "ants", "ant", "rodent",
         "mouse", "mice", "rat", "bed bug", "wasp", "infestation",
     )),
     (ServiceCategory.appliance_repair, (
@@ -103,6 +143,15 @@ def parse_analysis(raw: str) -> LLMAnalysis:
     return LLMAnalysis.model_validate(data)
 
 
+def _keyword_hit(text: str, keyword: str) -> bool:
+    """Match a keyword as a token, not a substring of another word (ant vs want)."""
+    needle = (keyword or "").strip().lower()
+    if not needle:
+        return False
+    pattern = r"(?<![a-z0-9])" + re.escape(needle) + r"(?![a-z0-9])"
+    return re.search(pattern, text) is not None
+
+
 def _history_blob(history: list[ChatMessage] | None, user_text: str) -> str:
     parts: list[str] = []
     if history:
@@ -115,11 +164,11 @@ def _history_blob(history: list[ChatMessage] | None, user_text: str) -> str:
 def fallback_analysis(user_text: str, history: list[ChatMessage] | None = None) -> LLMAnalysis:
     """Rule-based classifier used when DeepSeek is unavailable or invalid."""
     blob = _history_blob(history, user_text)
-    lowered = f" {blob.lower()} "
+    lowered = blob.lower()
     category = ServiceCategory.unknown
     confidence = 0.2
     for candidate, keywords in CATEGORY_KEYWORDS:
-        if any(keyword in lowered for keyword in keywords):
+        if any(_keyword_hit(lowered, keyword) for keyword in keywords):
             category = candidate
             confidence = 0.75
             break
@@ -176,13 +225,13 @@ def _fallback_question(category: ServiceCategory) -> str:
     return questions[category]
 
 
-def _client() -> Optional[OpenAI]:
+def _client(timeout: float = 30.0) -> Optional[OpenAI]:
     if not config.deepseek_configured():
         return None
     return OpenAI(
         api_key=config.DEEPSEEK_API_KEY,
         base_url=config.DEEPSEEK_BASE_URL,
-        timeout=30.0,
+        timeout=timeout,
     )
 
 
@@ -239,3 +288,82 @@ def analyze(history: list[ChatMessage]) -> tuple[LLMAnalysis, bool]:
                 use_json_mode = False
 
     return fallback_analysis(last_user, history), True
+
+
+def _hazard_labels(hazards: list[Hazard]) -> str:
+    labels = {
+        Hazard.gas_leak: "gas leak / gas odor",
+        Hazard.fire_smoke: "fire or smoke",
+        Hazard.carbon_monoxide: "carbon monoxide",
+        Hazard.electrical: "electrical sparking or burning",
+        Hazard.flood_electrical: "water near electrical equipment",
+    }
+    names = [labels.get(h, h.value) for h in hazards]
+    return ", ".join(names) if names else "unspecified hazard"
+
+
+def fallback_safety_reply(hazards: list[Hazard], mode: str = "escalate") -> str:
+    from app.safety import advice_for
+
+    if mode == "resume":
+        return (
+            "Thanks for confirming you are safe. I can continue helping you find a provider. "
+            "I still will not diagnose the problem."
+        )
+    canned = advice_for(hazards)
+    if canned:
+        if mode == "escalate":
+            return (
+                canned
+                + " If you have reached safety and still need a contractor, tell me you are safe."
+            )
+        return canned
+    return (
+        "Please get to safety and call 911 if this is an emergency. "
+        "I will not look up contractors until you confirm everyone is safe."
+    )
+
+
+def _sanitize_safety_text(raw: str, mode: str) -> str:
+    text = strip_fences(raw).strip().strip('"')
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) < 20:
+        raise ValueError("Safety reply too short")
+    if len(text) > 900:
+        text = text[:897].rsplit(" ", 1)[0] + "..."
+    lowered = text.lower()
+    if mode == "escalate" and "911" not in lowered and "emergency" not in lowered:
+        text = text.rstrip(".") + ". From a safe place, call 911."
+    return text
+
+
+def safety_reply(
+    user_text: str,
+    hazards: list[Hazard],
+    mode: str = "escalate",
+) -> tuple[str, bool]:
+    """Return (message, used_fallback). Python owns the hold; this is copy only."""
+    prompt = {
+        "escalate": SAFETY_REPLY_PROMPT,
+        "caution": CAUTION_REPLY_PROMPT,
+        "resume": RESUME_REPLY_PROMPT,
+    }.get(mode, SAFETY_REPLY_PROMPT)
+    client = _client(timeout=12.0)
+    if client is None:
+        return fallback_safety_reply(hazards, mode), True
+
+    api_messages = [
+        {"role": "system", "content": prompt},
+        {
+            "role": "user",
+            "content": (
+                f"Classified hazards: {_hazard_labels(hazards)}.\n"
+                f"Homeowner said: {user_text.strip() or '(no text)'}"
+            ),
+        },
+    ]
+    try:
+        raw = _complete(client, api_messages, use_json_mode=False)
+        return _sanitize_safety_text(raw, mode), False
+    except Exception:  # noqa: BLE001 — copy may fall back; the hold still applies
+        return fallback_safety_reply(hazards, mode), True

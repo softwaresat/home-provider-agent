@@ -83,9 +83,22 @@ def test_complete_lead_and_email_draft():
     assert "Call" in (email.fallback_label or "")
 
 
+def _electrician() -> Provider:
+    return Provider(
+        place_id="p1",
+        name="Austin Electric",
+        phone="512-555-0142",
+        website="https://example.com",
+        address="Austin, TX 78704",
+        primary_type="electrician",
+        source="google_places",
+    )
+
+
 def test_email_does_not_dump_chat_or_form_fields():
     lead = build_lead(
         _session(
+            providers=[_electrician()],
             analysis=LLMAnalysis(
                 service_category=ServiceCategory.electrical,
                 category_confidence=0.9,
@@ -121,6 +134,7 @@ def test_email_does_not_dump_chat_or_form_fields():
 def test_email_is_first_person_and_humanizes_facts():
     lead = build_lead(
         _session(
+            providers=[_electrician()],
             analysis=LLMAnalysis(
                 service_category=ServiceCategory.electrical,
                 category_confidence=0.95,
@@ -210,6 +224,34 @@ def test_missing_provider_is_incomplete():
     lead = build_lead(_session(selected_place_id=None))
     assert lead.status == LeadStatus.incomplete
     assert "selected_provider" in lead.missing_required
+
+
+def test_unrelated_listing_cannot_complete_lead():
+    bakery = Provider(
+        place_id="bakery-1",
+        name="Austin Bakery",
+        primary_type="bakery",
+        phone="512-555-0199",
+        website="https://bakery.example",
+        source="google_places",
+    )
+    lead = build_lead(_session(providers=[bakery], selected_place_id="bakery-1"))
+    assert lead.status == LeadStatus.incomplete
+    assert "provider_trade_match" in lead.missing_required
+    assert draft_email(lead) is None
+
+
+def test_listing_without_contact_cannot_complete_lead():
+    silent = Provider(
+        place_id="p-silent",
+        name="Austin Rooter",
+        primary_type="plumber",
+        source="google_places",
+    )
+    lead = build_lead(_session(providers=[silent], selected_place_id="p-silent"))
+    assert lead.status == LeadStatus.incomplete
+    assert "provider_contact" in lead.missing_required
+    assert draft_email(lead) is None
 
 
 def test_safety_escalated_status():

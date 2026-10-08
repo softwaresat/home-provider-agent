@@ -65,6 +65,16 @@ def _name_match(provider: Provider, category: ServiceCategory) -> bool:
     return any(keyword in name for keyword in CATEGORY_NAME_KEYWORDS.get(category, ()))
 
 
+def is_trade_match(provider: Provider, category: ServiceCategory) -> bool:
+    if category == ServiceCategory.unknown:
+        return False
+    return _type_match(provider, category) or _name_match(provider, category)
+
+
+def is_contactable(provider: Provider) -> bool:
+    return bool(provider.phone or provider.email or provider.website or provider.maps_url)
+
+
 def _area_code(phone: str | None) -> str | None:
     digits = re.sub(r"\D", "", phone or "")
     if len(digits) == 11 and digits.startswith("1"):
@@ -142,6 +152,8 @@ def score_provider(
     ranked = provider.model_copy()
     ranked.match_score = round(score, 3)
     ranked.match_reasons = reasons
+    ranked.trade_confirmed = is_trade_match(provider, category)
+    ranked.contactable = is_contactable(provider)
     return ranked
 
 

@@ -133,10 +133,10 @@ export default function ProviderPanel({
         )}
       </div>
 
-      <p className="text-[11px] text-ink/50">
+      <p className="text-[11px] leading-relaxed text-ink/50">
         {searchSource === "google_places"
-          ? "Provider listings from Google. Powered by Google."
-          : "Fallback listings are recorded API data, not invented businesses. Powered by Google when live search is configured."}
+          ? "Listed business = exists in Google Places. Relevant match = trade looks compatible. Contactable = phone or website on the listing. Availability unconfirmed = no booking or job-acceptance check. Powered by Google."
+          : "Fallback listings are recorded API data, not invented businesses. A complete lead still needs a relevant, contactable listing. Powered by Google when live search is configured."}
       </p>
     </div>
   );

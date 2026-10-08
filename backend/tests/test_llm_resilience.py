@@ -1,5 +1,5 @@
-from app.llm import fallback_analysis, parse_analysis
-from app.models import ServiceCategory, Urgency
+from app.llm import fallback_analysis, fallback_safety_reply, parse_analysis, _sanitize_safety_text
+from app.models import Hazard, ServiceCategory, Urgency
 
 
 def test_valid_json_parses():
@@ -87,8 +87,32 @@ def test_keyword_fallback_uses_full_history_not_last_negation():
     assert analysis.service_category == ServiceCategory.water_damage
 
 
+def test_keyword_fallback_ant_is_not_substring_of_want():
+    analysis = fallback_analysis("I want someone to look at the kitchen sink leak.")
+    assert analysis.service_category == ServiceCategory.plumbing
+
+
+def test_keyword_fallback_ants_still_match_pest():
+    analysis = fallback_analysis("There are ants all over the kitchen counters.")
+    assert analysis.service_category == ServiceCategory.pest_control
+
+
 def test_keyword_fallback_roof_stain():
     analysis = fallback_analysis(
         "There's a wet stain on the ceiling in the guest room after last week's storm."
     )
     assert analysis.service_category == ServiceCategory.roofing
+
+
+def test_fallback_safety_reply_includes_911():
+    text = fallback_safety_reply([Hazard.gas_leak], mode="escalate")
+    assert "911" in text
+    assert "safe" in text.lower()
+
+
+def test_sanitize_safety_text_appends_911_if_missing():
+    text = _sanitize_safety_text(
+        "Please leave the house and wait outside until you know it is clear.",
+        mode="escalate",
+    )
+    assert "911" in text

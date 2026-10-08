@@ -54,7 +54,14 @@ export default function Chat({
       {safetyAdvice && (
         <div className="mb-3 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-950">
           <p className="font-semibold">Safety first</p>
-          <p className="mt-1 leading-relaxed">{safetyAdvice}</p>
+          {stage === "safety_escalated" ? (
+            <p className="mt-1 leading-relaxed">
+              Contractor search is paused until you confirm everyone is safe. Follow the
+              message in chat, and call 911 if this is an emergency.
+            </p>
+          ) : (
+            <p className="mt-1 leading-relaxed">{safetyAdvice}</p>
+          )}
         </div>
       )}
 

@@ -185,6 +185,8 @@ class Provider(BaseModel):
     source: str = "google_places"
     match_score: float = 0.0
     match_reasons: list[str] = Field(default_factory=list)
+    trade_confirmed: bool = False
+    contactable: bool = False
 
 
 class ContactInfo(BaseModel):

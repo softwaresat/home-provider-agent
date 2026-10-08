@@ -166,15 +166,16 @@ Statuses: `complete` | `incomplete` | `safety_escalated`.
 
 Command: `python eval/run_eval.py`. Full table: [backend/eval/results.md](backend/eval/results.md).
 
-Latest run: **live DeepSeek (`deepseek-flash`) and live Google Places**, 10 scripted scenarios across Austin ZIPs.
+Latest run: **live DeepSeek (`deepseek-flash`) and live Google Places**, 10 real-life **edge** scenarios (want≠pest, ants, gas, negated gas, “not safe”, sparking caution, water-near-outlets, CO, storm ceiling stain, completed-lead lock).
 
 | Proxy | Result | Meaning |
 |---|---|---|
-| Category match | **10/10** | Scripted problem → expected trade |
-| Urgency in expected set | **10/10** | Including sparking outlet → emergency |
-| Escalation correctness | **10/10** | Gas smell held; others did not |
-| Funnel completion (non-emergency) | **9/9** | Reached a `complete` lead in 3–6 user turns (1–4 follow-ups) |
-| Quality-checked leads (non-emergency) | **9/9** | Chosen provider's trade confirmed and not flagged as a call center |
+| Category match | **10/10** | Including want≠pest and ants→pest |
+| Urgency in expected set | **10/10** | Sparking / water-near-outlets → emergency without a 911 hold |
+| Escalation correctness | **10/10** | Gas and CO held; “not everyone is safe” did not clear; negated gas did not trigger |
+| Edge-case checks | **10/10** | 911 copy, no search on hold, caution vs hold, lead lock |
+| Funnel completion (non-emergency) | **7/7** | The three emergencies correctly never completed |
+| Quality-checked leads (non-emergency) | **7/7** | Chosen provider's trade confirmed and not flagged as a call center |
 
 How to read these honestly:
 
@@ -184,7 +185,7 @@ How to read these honestly:
 
 Sample **success path** (the brief's example, ZIP 78717): "Water started coming into my basement last night after the storm" → asks whether water is near electrical, then about a sump pump → live water-restoration listings → select → contact + address + consent → JSON lead + first-person draft email.
 
-Sample **safety path** (gas smell): first message → fixed 911 / leave-the-home copy → `safety_escalated` → no provider search.
+Sample **safety path** (gas smell): first message → rule-based hold + model-written 911 copy → `safety_escalated` → no provider search.
 
 ## What to build next for production
 

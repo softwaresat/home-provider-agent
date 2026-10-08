@@ -64,8 +64,18 @@ export default function LeadPanel({
           />
           <Field
             label="Provider"
-            value={lead.selected_provider?.name}
-            missing={lead.missing_required?.includes("selected_provider")}
+            value={
+              lead.missing_required?.includes("provider_trade_match")
+                ? `${lead.selected_provider?.name || "Selected listing"} (trade unconfirmed)`
+                : lead.missing_required?.includes("provider_contact")
+                  ? `${lead.selected_provider?.name || "Selected listing"} (not contactable)`
+                  : lead.selected_provider?.name
+            }
+            missing={
+              lead.missing_required?.includes("selected_provider") ||
+              lead.missing_required?.includes("provider_trade_match") ||
+              lead.missing_required?.includes("provider_contact")
+            }
           />
           <Field
             label="Consent"

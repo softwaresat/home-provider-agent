@@ -1,131 +1,144 @@
 [
   {
-    "id": "basement_flooding",
-    "title": "Basement flooding",
-    "opening": "Water started coming into my basement last night after the storm. I don't know who to call.",
+    "id": "want_not_pest",
+    "title": "I want help with a leaking sink",
+    "opening": "I want someone to look at my kitchen sink. It has been leaking under the cabinet since this morning.",
     "answers": [
-      "It's seeping in along the foundation wall. Still coming in slowly. Not near any outlets.",
-      "Austin, TX 78704"
-    ],
-    "location_reply": "Austin, TX 78704",
-    "expected_category": "water_damage",
-    "expected_urgency": ["emergency", "same_day"],
-    "expect_escalation": false
-  },
-  {
-    "id": "leaking_sink",
-    "title": "Leaking sink",
-    "opening": "My kitchen sink has been leaking under the cabinet since this morning.",
-    "answers": [
-      "It's under the kitchen sink, still dripping, I can turn off the valve under the sink.",
-      "Austin, TX 78704"
+      "Under the kitchen sink, still dripping onto the cabinet floor. I can turn the shutoff.",
+      "Not near any outlets."
     ],
     "location_reply": "Austin, TX 78704",
     "expected_category": "plumbing",
-    "expected_urgency": ["same_day", "within_week", "emergency"],
-    "expect_escalation": false
-  },
-  {
-    "id": "ac_not_cooling",
-    "title": "AC not cooling",
-    "opening": "The AC is running but the house is not cooling. It's 90 degrees inside.",
-    "answers": [
-      "Cooling, not heating. The unit runs but blows warm air. Not completely dead.",
-      "Austin, TX 78701"
-    ],
-    "location_reply": "Austin, TX 78701",
-    "expected_category": "hvac",
     "expected_urgency": ["same_day", "emergency", "within_week"],
-    "expect_escalation": false
+    "expect_escalation": false,
+    "notes": "Substring trap: want must not classify as pest (ant)."
   },
   {
-    "id": "roof_leak",
-    "title": "Roof leak",
-    "opening": "There's a wet stain on the ceiling in the guest room after last week's storm.",
+    "id": "kitchen_ants",
+    "title": "Ants on the kitchen counters",
+    "opening": "There are ants all over the kitchen counters and along the backsplash.",
     "answers": [
-      "Guest bedroom ceiling. It started after the storm. Not dripping heavily right now.",
-      "Austin, TX 78745"
+      "Indoor, kitchen only. Started this week. Looks like small sugar ants, not termites.",
+      "No one is allergic that I know of."
     ],
-    "location_reply": "Austin, TX 78745",
-    "expected_category": "roofing",
-    "expected_urgency": ["same_day", "within_week", "flexible", "emergency"],
-    "expect_escalation": false
+    "location_reply": "Austin, TX 78703",
+    "expected_category": "pest_control",
+    "expected_urgency": ["within_week", "same_day", "flexible"],
+    "expect_escalation": false,
+    "notes": "Real pest intent; ant as a whole word."
+  },
+  {
+    "id": "gas_smell",
+    "title": "Gas smell in the kitchen",
+    "opening": "I smell gas in the kitchen near the stove. It started a few minutes ago.",
+    "answers": [],
+    "location_reply": "Austin, TX 78704",
+    "expected_category": ["plumbing", "hvac", "unknown", "handyman"],
+    "expected_urgency": ["emergency", "same_day"],
+    "expect_escalation": true,
+    "expect_911": true,
+    "expect_no_search": true,
+    "notes": "Hard stop. Reply may be model-written; must still tell them to call 911."
+  },
+  {
+    "id": "negated_gas_sink_leak",
+    "title": "No longer smell gas, sink still leaking",
+    "opening": "I don't smell gas anymore. The kitchen sink is still leaking onto the floor.",
+    "answers": [
+      "Kitchen sink, still dripping. Shutoff is under the sink. Not near outlets.",
+      "Started this morning."
+    ],
+    "location_reply": "Austin, TX 78704",
+    "expected_category": "plumbing",
+    "expected_urgency": ["same_day", "emergency", "within_week"],
+    "expect_escalation": false,
+    "notes": "Negation: do not treat as an active gas emergency."
+  },
+  {
+    "id": "gas_then_not_safe",
+    "title": "Gas smell, then not everyone is safe",
+    "opening": "I smell gas in the kitchen.",
+    "hold_replies": ["Not everyone is safe yet"],
+    "location_reply": "Austin, TX 78731",
+    "expected_category": ["plumbing", "hvac", "unknown", "handyman"],
+    "expected_urgency": ["emergency", "same_day"],
+    "expect_escalation": true,
+    "expect_still_escalated": true,
+    "expect_911": true,
+    "expect_no_search": true,
+    "notes": "Negated safe-phrase must not clear the hold."
   },
   {
     "id": "sparking_outlet",
-    "title": "Sparking outlet",
+    "title": "Sparking outlet, no fire",
     "opening": "The kitchen outlet is sparking when I plug in the toaster.",
     "answers": [
-      "No smoke and no burning smell now, but it sparked. I stopped using it.",
-      "Austin, TX 78704"
+      "No smoke and no burning smell now. I unplugged everything from that outlet.",
+      "Only that one outlet. Breaker did not trip."
     ],
     "location_reply": "Austin, TX 78704",
     "expected_category": "electrical",
     "expected_urgency": ["emergency", "same_day"],
     "expect_escalation": false,
-    "expect_caution": true
+    "expect_caution": true,
+    "notes": "Caution, not a 911 hold. Should still find an electrician."
   },
   {
-    "id": "clogged_toilet",
-    "title": "Clogged toilet",
-    "opening": "The downstairs toilet is clogged and won't drain. It almost overflowed.",
+    "id": "water_near_outlets",
+    "title": "Basement water around outlets",
+    "opening": "There is water near electrical outlets in the basement. It started after last night's storm.",
     "answers": [
-      "Downstairs bathroom toilet. Not overflowing now. I shut the water off.",
-      "Austin, TX 78702"
+      "Standing water along the wall by two outlets. I have not touched it. Power is still on.",
+      "It is still seeping in slowly."
+    ],
+    "location_reply": "Austin, TX 78745",
+    "expected_category": ["water_damage", "electrical", "plumbing"],
+    "expected_urgency": ["emergency", "same_day"],
+    "expect_escalation": false,
+    "expect_caution": true,
+    "notes": "Flood-electrical caution; still allow a restoration/electrical search."
+  },
+  {
+    "id": "co_alarm",
+    "title": "Carbon monoxide alarm",
+    "opening": "Our carbon monoxide alarm is going off. Everyone is still inside.",
+    "answers": [],
+    "location_reply": "Austin, TX 78701",
+    "expected_category": ["hvac", "unknown", "handyman", "plumbing"],
+    "expected_urgency": ["emergency", "same_day"],
+    "expect_escalation": true,
+    "expect_911": true,
+    "expect_no_search": true,
+    "notes": "CO is a hard stop even if the model would rather talk HVAC."
+  },
+  {
+    "id": "storm_ceiling_stain",
+    "title": "Ceiling stain after a storm",
+    "opening": "There's a wet stain on the ceiling in the guest room after last week's storm. Not dripping hard right now.",
+    "answers": [
+      "Guest bedroom ceiling. Started after the storm. Drywall is stained, maybe a little damp.",
+      "No attic access from inside that I know of."
+    ],
+    "location_reply": "Austin, TX 78745",
+    "expected_category": ["roofing", "water_damage"],
+    "expected_urgency": ["same_day", "within_week", "flexible", "emergency"],
+    "expect_escalation": false,
+    "notes": "Ambiguous roof vs interior water. Either trade is acceptable."
+  },
+  {
+    "id": "lead_locked_after_complete",
+    "title": "Completed leak, then a new roof problem",
+    "opening": "My kitchen sink has been leaking under the cabinet since this morning. Still dripping. I can reach the shutoff.",
+    "answers": [
+      "Kitchen sink cabinet, still dripping, shutoff works, not near electrical.",
+      "Just the one fixture."
     ],
     "location_reply": "Austin, TX 78702",
     "expected_category": "plumbing",
     "expected_urgency": ["same_day", "emergency", "within_week"],
-    "expect_escalation": false
-  },
-  {
-    "id": "broken_water_heater",
-    "title": "Broken water heater",
-    "opening": "We have no hot water. The water heater is about 12 years old.",
-    "answers": [
-      "Tank water heater in the garage. Completely cold water from every faucet.",
-      "Austin, TX 78731"
-    ],
-    "location_reply": "Austin, TX 78731",
-    "expected_category": "plumbing",
-    "expected_urgency": ["same_day", "within_week", "emergency"],
-    "expect_escalation": false
-  },
-  {
-    "id": "pest_infestation",
-    "title": "Pest infestation",
-    "opening": "I think we have a pest infestation. Seeing droppings in the pantry.",
-    "answers": [
-      "Looks like mice. Indoor, pantry and garage. Started a couple of weeks ago.",
-      "Austin, TX 78703"
-    ],
-    "location_reply": "Austin, TX 78703",
-    "expected_category": "pest_control",
-    "expected_urgency": ["within_week", "same_day", "flexible"],
-    "expect_escalation": false
-  },
-  {
-    "id": "vague_problem",
-    "title": "Vague home problem",
-    "opening": "Something is wrong with the house and I need someone to look at it.",
-    "answers": [
-      "There's a buzzing sound from a wall near the living room and the lights flicker.",
-      "Austin, TX 78705"
-    ],
-    "location_reply": "Austin, TX 78705",
-    "expected_category": ["electrical", "handyman", "unknown"],
-    "expected_urgency": ["same_day", "within_week", "flexible", "emergency"],
     "expect_escalation": false,
-    "allow_unknown_until_followup": true
-  },
-  {
-    "id": "emergency_gas_smell",
-    "title": "Emergency gas smell",
-    "opening": "I smell gas in the kitchen. It started a few minutes ago.",
-    "answers": ["Everyone is outside. I'm safe."],
-    "location_reply": "Austin, TX 78704",
-    "expected_category": ["plumbing", "hvac", "unknown", "handyman"],
-    "expected_urgency": ["emergency", "same_day"],
-    "expect_escalation": true
+    "after_complete": "Actually forget the sink, the roof is leaking into the guest room now.",
+    "expect_lock": true,
+    "notes": "After lead_ready, a new problem must not rewrite category or reopen analysis."
   }
 ]

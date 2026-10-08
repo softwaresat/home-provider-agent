@@ -1,5 +1,5 @@
 from app import agent
-from app.agent import _extract_location
+from app.agent import _extract_location, apply_location_string
 from app.models import (
     ContactInfo,
     LeadStatus,
@@ -61,19 +61,40 @@ def test_extract_location_does_not_swallow_prose():
 
 
 def test_gas_smell_escalates_without_search(monkeypatch):
-    called = {"search": False}
+    called = {"search": False, "analyze": False, "safety": False}
 
     def fake_search(*_args, **_kwargs):
         called["search"] = True
         return [], "google_places", None
 
+    def fake_analyze(_history):
+        called["analyze"] = True
+        raise AssertionError("gas emergency must not run intake analysis")
+
+    def fake_safety_reply(user_text, hazards, mode="escalate"):
+        called["safety"] = True
+        assert mode == "escalate"
+        assert "smell gas" in user_text.lower()
+        return (
+            "Get everyone outside right now and call 911 from a safe place. "
+            "I will not look up contractors until you confirm everyone is safe.",
+            False,
+        )
+
     monkeypatch.setattr("app.places.search_text", fake_search)
+    monkeypatch.setattr("app.llm.analyze", fake_analyze)
+    monkeypatch.setattr("app.llm.safety_reply", fake_safety_reply)
     session = agent.create_session("gas")
     agent.handle_user_message(session, "I smell gas in the kitchen. It started a few minutes ago.")
     assert session.stage == Stage.safety_escalated
     assert called["search"] is False
+    assert called["analyze"] is False
+    assert called["safety"] is True
     assert session.lead is not None
     assert session.lead.status == LeadStatus.safety_escalated
+    assert "911" in session.messages[-1].content
+    assert "Get everyone outside" in session.messages[-1].content
+    assert session.safety_advice == session.messages[-1].content
 
 
 def test_happy_path_completes_lead_with_stubbed_places(monkeypatch):
@@ -301,6 +322,55 @@ def test_high_followup_cap_then_searches(monkeypatch):
     assert session.questions_asked == agent.MAX_FOLLOWUPS
     assert session.stage == Stage.showing_providers
     assert session.providers
+
+
+def test_location_change_replaces_stale_zip():
+    session = agent.create_session("loc-replace")
+    apply_location_string(session, "Austin, TX 78704")
+    assert session.city == "Austin"
+    assert session.zip_code == "78704"
+    apply_location_string(session, "Dallas, TX")
+    assert session.city == "Dallas"
+    assert session.zip_code is None
+    assert "78704" not in (session.location_query or "")
+    if session.analysis:
+        assert session.analysis.zip_code is None
+
+
+def test_completed_lead_does_not_mutate_analysis(monkeypatch):
+    _stub_places(monkeypatch)
+
+    def fake_analyze(_history):
+        return _analysis(next_question=None, missing_details=[]), False
+
+    monkeypatch.setattr("app.llm.analyze", fake_analyze)
+    session = agent.create_session("lock-lead")
+    agent.handle_location(session, "Austin, TX 78704")
+    agent.handle_user_message(session, "My kitchen sink has been leaking under the cabinet.")
+    agent.handle_select(session, "ChIJ-eval")
+    agent.handle_contact(
+        session,
+        ContactInfo(
+            name="Alex Rivera",
+            phone="512-555-0101",
+            email="alex@example.com",
+            service_address="1200 Barton Springs Rd, Austin, TX 78704",
+            consent_to_share=True,
+        ),
+    )
+    assert session.stage == Stage.lead_ready
+    summary = session.analysis.problem_summary
+    category = session.analysis.service_category
+
+    def boom(_history):
+        raise AssertionError("completed leads must not call the LLM")
+
+    monkeypatch.setattr("app.llm.analyze", boom)
+    agent.handle_user_message(session, "Actually it is a roof leak and I also have ants.")
+    assert session.stage == Stage.lead_ready
+    assert session.analysis.service_category == category
+    assert session.analysis.problem_summary == summary
+    assert "already complete" in session.messages[-1].content.lower()
 
 
 def test_header_location_does_not_abort_gathering(monkeypatch):

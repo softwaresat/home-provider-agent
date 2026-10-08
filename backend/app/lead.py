@@ -15,7 +15,7 @@ from app.models import (
     SessionState,
     Urgency,
 )
-from app.ranking import match_explanation
+from app.ranking import is_contactable, is_trade_match, match_explanation
 from app.safety import advice_for, is_escalation
 
 URGENCY_LABEL = {
@@ -65,6 +65,10 @@ def build_lead(session: SessionState) -> Lead:
         missing_required.append("customer_phone_or_email")
     if provider is None:
         missing_required.append("selected_provider")
+    elif not is_trade_match(provider, category):
+        missing_required.append("provider_trade_match")
+    if provider is not None and not is_contactable(provider):
+        missing_required.append("provider_contact")
     if not contact or not contact.consent_to_share:
         missing_required.append("consent_to_share")
     if not contact or not contact.service_address:
@@ -420,6 +424,8 @@ def _problem_paragraph(lead: Lead) -> str:
 
 def draft_email(lead: Lead) -> EmailDraft | None:
     """Write a short professional service request. Never sent."""
+    if lead.status != LeadStatus.complete:
+        return None
     provider = lead.selected_provider
     if provider is None:
         return None
