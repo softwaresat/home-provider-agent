@@ -5,7 +5,9 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 
-MIN_COSINE = 0.55
+# 0.64 is where a bare "something is leaking" matches gas-leak phrases.
+# Real gas and fire paraphrases in the safety tests sit at about 0.78 and up.
+MIN_COSINE = 0.67
 MODEL_NAME = "all-MiniLM-L6-v2"
 
 _MODEL = None

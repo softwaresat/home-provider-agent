@@ -12,6 +12,7 @@ from app.models import (
     EmailDraft,
     Lead,
     LeadStatus,
+    LLMAnalysis,
     Provider,
     ServiceCategory,
     SessionState,
@@ -319,9 +320,48 @@ def refresh_email(session: SessionState) -> None:
         )
 
 
+def _stored_summary(session: SessionState) -> str:
+    analysis = session.analysis
+    return ((analysis.problem_summary if analysis else "") or "").strip()
+
+
+def _set_summary(session: SessionState, text: str) -> None:
+    cleaned = " ".join((text or "").split()).strip()
+    if not cleaned:
+        return
+    if session.analysis is None:
+        session.analysis = LLMAnalysis(problem_summary=cleaned)
+    else:
+        session.analysis.problem_summary = cleaned
+
+
+def _fill_summary_from_chat(session: SessionState) -> None:
+    """The chat is the problem. A blank stored summary should not block the lead."""
+    if _stored_summary(session):
+        return
+    if not any(message.role == "user" and (message.content or "").strip() for message in session.messages):
+        return
+    facts = session.analysis.facts if session.analysis else None
+    paragraph, used_fallback = llm.draft_problem_paragraph(
+        session.messages,
+        problem_summary="",
+        facts=facts,
+    )
+    if used_fallback:
+        session.llm_fallback_used = True
+    _set_summary(session, paragraph)
+
+
 def apply_lead(session: SessionState, contact: ContactInfo | None = None) -> None:
     if contact is not None:
         session.contact = contact
+        written = (contact.problem_summary or "").strip()
+        if written:
+            _set_summary(session, written)
+    # A selected listing with a blank summary is the stuck lead. The chat is
+    # enough to write one; do not wait for the homeowner to retype it.
+    if not _stored_summary(session) and (session.selected_place_id or session.contact):
+        _fill_summary_from_chat(session)
     previous = session.email
     session.lead = build_lead(session)
     if session.lead.status == LeadStatus.complete:

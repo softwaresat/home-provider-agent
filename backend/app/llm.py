@@ -30,7 +30,8 @@ Return ONLY a JSON object with this shape:
   "hazards": [],
   "missing_details": ["dispatch-critical unknowns only"],
   "next_question": "ONE targeted question, or null if a provider can be matched",
-  "dispatch_ready": false
+  "dispatch_ready": false,
+  "safety_confirmed": false
 }
 
 Valid hazards: gas_leak, fire_smoke, electrical, flood_electrical, carbon_monoxide.
@@ -45,21 +46,60 @@ a few more. Do not keep asking because extra diagnostic detail would be nice.
 Do not ask about water pressure, neighbors, flushing fixtures, brand/model, or
 "have you tried…" unless the answer would change the trade, urgency, or safety.
 If the opening message is already enough, ask nothing.
+An unreadable stretch outranks that. If any part cannot be read as ordinary
+language without inventing the words, ask one question about that part first.
+A normal typo of a real word is readable. Do not guess a correction and then
+treat the stretch as clear, and do not write that guess into problem_summary.
+Do not set dispatch_ready while that part might change the trade, where the
+problem is, or what is wrong.
 If the homeowner does not know, record that slot as unknown in facts (not as a
-negative finding). Keep every fact and the problem_summary already collected —
+negative finding). Do not copy unreadable wording into problem_summary. Keep every
+fact and the problem_summary already collected —
 never replace problem_summary with a shrug ("I am not sure") or a chat transcript.
-If a trade can already be briefed, set next_question to null and dispatch_ready
-true. Otherwise ask a different useful question — never the same slot, never a
+If a trade can already be briefed and nothing they wrote is still unclear, set
+next_question to null and dispatch_ready true. Otherwise ask a different useful
+question — never the same slot, never a
 canned leak/clog substitute. Explicit "no" / "not leaking" belongs in facts as a
 confirmed negative, distinct from unknown.
 Extract every useful detail they already said into facts and problem_summary.
 
 Question rules: never ask two questions; never repeat; never ask city, ZIP, name,
 phone, email, or any address.
-A short optional "intake hints" block may appear after a trade is known. It lists
-example jobs, not a match and not a script. Use at most one hint, and only if it
-would change dispatch. Ignore hints for unusual or mixed-trade jobs.
+A job catalog may appear on each turn. Use it alongside the chat to pick a trade
+and decide whether to ask anything. It is not a keyword match and not a script.
+If nothing in it fits, use unknown. Use at most one catalog hint, and only if it
+would change dispatch. Ignore it for unusual or mixed-trade jobs.
 If the user described an emergency (gas, fire, CO), set the matching hazard and urgency emergency.
+Pick a trade only when the problem itself supports it. If several trades could fit,
+set service_category unknown and ask one question that would change the trade.
+Do not set dispatch_ready on a guessed trade.
+If a 911-hold note is present, set safety_confirmed from THIS user message only:
+true if they are clearing the hold so we may continue; false if they are still
+in the emergency. Judge meaning. Do not require particular wording.
+When safety_confirmed is true, the hold is over. next_question is about the
+contractor work, or null if a trade can already be briefed.
+"""
+
+SAFETY_HOLD_TURN = """Python already paused this session for a fire, gas, or carbon monoxide emergency.
+Contractor search is blocked until they clear that hold.
+Set safety_confirmed from the latest user message: true if they are clearing the hold
+so we may continue; false if they are still in the emergency. Judge meaning.
+Classify the original home problem for service_category. If the trade is unclear,
+use unknown and ask one question that would change it. Do not set dispatch_ready
+on a guessed trade. When safety_confirmed is true, the hold is over, so
+next_question is about the contractor work.
+Return JSON only.
+"""
+
+CONFIRM_SAFE_PROMPT = """The intake session is paused. Python already told this person to get out
+and call 911 for fire, gas, or carbon monoxide. Contractor search is blocked until they
+clear that hold.
+
+Read ONLY the user message. Return ONLY JSON: {"safety_confirmed": true} or {"safety_confirmed": false}
+
+true if they are clearing the hold so we may continue helping them.
+false if they are still in the emergency.
+Judge meaning. Do not require particular wording.
 """
 
 SAFETY_REPLY_PROMPT = """You write the in-chat message for a home-services intake agent after Python
@@ -107,9 +147,11 @@ Python already has the greeting, service timing, address, phone, and signature. 
 ONLY the description of the problem.
 
 Rules:
-- First person (I/my), as the homeowner would write it.
+- First person (I/my), as a clear note to a contractor, not a paste of the chat.
 - Use only the chat transcript and any collected notes. Do not invent symptoms, causes,
-  or a diagnosis.
+  or a diagnosis. Correct spelling and wording. Do not copy text a contractor could not read.
+- If part of what they said could not be understood, say that this part was unclear.
+  Do not invent a meaning for it, and do not leave it out as if they never said it.
 - Include contractor-useful details they already gave (what they notice, where/how
   widespread, timing). If they said they do not know something, say that it is unknown
   rather than turning it into a no.
@@ -118,6 +160,35 @@ Rules:
 - Do not greet, sign off, or use markdown or bullet labels.
 - 2-6 short sentences. Return ONLY the paragraph text.
 """
+
+CLARITY_PROMPT = """Read ONLY the latest homeowner message. Return ONLY JSON:
+{"needs_clarification": true, "question": "one question"}
+or {"needs_clarification": false, "question": null}
+
+needs_clarification is true when any stretch cannot be read as ordinary language
+without inventing what the words were. Ordinary typos of real words, slang, and
+"I don't know" are readable.
+If true, question asks what that stretch meant. One question. Do not ask for city,
+ZIP, name, phone, email, or address. Do not guess a correction and then treat the
+stretch as clear.
+If false, question is null.
+"""
+
+_INTAKE_KEYS = {
+    "service_category",
+    "category_confidence",
+    "urgency",
+    "urgency_reason",
+    "problem_summary",
+    "facts",
+    "city",
+    "zip_code",
+    "hazards",
+    "missing_details",
+    "next_question",
+    "dispatch_ready",
+    "safety_confirmed",
+}
 
 FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE | re.MULTILINE)
 
@@ -165,6 +236,37 @@ def parse_analysis(raw: str) -> LLMAnalysis:
     data = json.loads(cleaned)
     if not isinstance(data, dict):
         raise ValueError("LLM output is not a JSON object")
+    if not any(key in data for key in _INTAKE_KEYS):
+        raise ValueError(
+            "JSON did not match the intake schema. Use service_category, "
+            "next_question, and dispatch_ready."
+        )
+    category = data.get("service_category")
+    if category not in (None, ""):
+        normalized = str(category).lower().strip().replace(" ", "_").replace("-", "_")
+        allowed = {item.value for item in ServiceCategory}
+        if normalized not in allowed:
+            names = ", ".join(sorted(allowed))
+            missing_confidence = ""
+            if "category_confidence" not in data:
+                missing_confidence = " Also include category_confidence as a number from 0 to 1."
+            raise ValueError(
+                f"service_category must be one of {names}. Got {category!r}."
+                f"{missing_confidence}"
+            )
+    elif "service_category" not in data and "safety_confirmed" not in data:
+        raise ValueError("JSON must include service_category.")
+    if "service_category" in data and "category_confidence" not in data:
+        raise ValueError("category_confidence is required with service_category.")
+    if str(data.get("service_category") or "").lower().strip() == ServiceCategory.unknown.value:
+        question = data.get("next_question")
+        has_question = isinstance(question, str) and bool(question.strip())
+        ready = data.get("dispatch_ready")
+        ready_true = ready is True or str(ready).lower() in {"true", "yes", "1"}
+        if ready_true or not has_question:
+            raise ValueError(
+                "service_category unknown needs dispatch_ready false and a next_question."
+            )
     return LLMAnalysis.model_validate(data)
 
 
@@ -204,16 +306,11 @@ def fallback_analysis(user_text: str, history: list[ChatMessage] | None = None) 
     if len(summary) > 280:
         summary = summary[:277] + "..."
 
-    words = len(re.findall(r"[a-z0-9]+", blob.lower()))
-    detailed = category != ServiceCategory.unknown and words >= 16
-    if detailed:
-        next_question = None
-        missing_details: list[str] = []
-        dispatch_ready = True
-    else:
-        next_question = _fallback_question(category)
-        missing_details = ["problem details"]
-        dispatch_ready = False
+    # Length is not understanding. This path only saw keywords, so it asks
+    # instead of searching or treating unread wording as empty.
+    next_question = _fallback_question(category)
+    missing_details = ["problem details"]
+    dispatch_ready = False
     return LLMAnalysis(
         service_category=category,
         category_confidence=confidence,
@@ -243,23 +340,35 @@ def _fallback_question(category: ServiceCategory) -> str:
 
 
 def _client(timeout: float = 30.0) -> Optional[OpenAI]:
-    if not config.deepseek_configured():
+    chosen = config.active_llm()
+    if chosen is None:
         return None
+    api_key, base_url, _model = chosen
     return OpenAI(
-        api_key=config.DEEPSEEK_API_KEY,
-        base_url=config.DEEPSEEK_BASE_URL,
+        api_key=api_key,
+        base_url=base_url,
         timeout=timeout,
     )
 
 
 def _complete(client: OpenAI, messages: list[dict], use_json_mode: bool) -> str:
+    _key, _base_url, model = config.active_llm() or ("", "", config.GEMINI_MODEL)
     kwargs = {
-        "model": config.DEEPSEEK_MODEL,
+        "model": model,
         "messages": messages,
         "temperature": 0.2,
     }
     if use_json_mode:
         kwargs["response_format"] = {"type": "json_object"}
+    if config.gemini_configured():
+        # 3.8 Flash cannot turn thinking off. Low keeps intake JSON cheap.
+        kwargs["extra_body"] = {
+            "extra_body": {
+                "google": {
+                    "thinking_config": {"thinking_level": "low"},
+                }
+            }
+        }
     response = client.chat.completions.create(**kwargs)
     content = response.choices[0].message.content
     if not content:
@@ -290,9 +399,89 @@ def _urgency_from_text(lowered: str) -> tuple[Urgency, str]:
     return urgency, urgency_reason
 
 
+def _parse_safety_confirmed(raw: str) -> bool:
+    cleaned = strip_fences(raw)
+    data = json.loads(cleaned)
+    if not isinstance(data, dict):
+        return False
+    return LLMAnalysis.model_validate(
+        {"safety_confirmed": data.get("safety_confirmed")}
+    ).safety_confirmed
+
+
+def _parse_clarification(raw: str) -> tuple[bool, str | None]:
+    cleaned = strip_fences(raw)
+    data = json.loads(cleaned)
+    if not isinstance(data, dict) or "needs_clarification" not in data:
+        return False, None
+    needs = LLMAnalysis.model_validate(
+        {"safety_confirmed": data.get("needs_clarification")}
+    ).safety_confirmed
+    question = data.get("question")
+    if not isinstance(question, str) or not question.strip():
+        return needs, None
+    return needs, question.strip()
+
+
+def clarify_unreadable(user_text: str, client: OpenAI | None = None) -> tuple[bool, str | None]:
+    """Whether any stretch of this message cannot be read. No phrase list."""
+    text = (user_text or "").strip()
+    if not text:
+        return False, None
+    if client is None:
+        client = _client()
+    if client is None:
+        return False, None
+    messages = [
+        {"role": "system", "content": CLARITY_PROMPT},
+        {"role": "user", "content": text},
+    ]
+    try:
+        raw = _complete(client, messages, use_json_mode=True)
+        return _parse_clarification(raw)
+    except Exception:  # noqa: BLE001 — a failed clarity read must not block intake
+        try:
+            raw = _complete(client, messages, use_json_mode=False)
+            return _parse_clarification(raw)
+        except Exception:  # noqa: BLE001
+            return False, None
+
+
+def _apply_clarification(analysis: LLMAnalysis, user_text: str, client: OpenAI) -> None:
+    """An unreadable stretch blocks search even if intake JSON says otherwise."""
+    needs, question = clarify_unreadable(user_text, client=client)
+    if not needs:
+        return
+    analysis.dispatch_ready = False
+    if question:
+        analysis.next_question = question
+
+
+def confirm_household_safe(user_text: str, client: OpenAI | None = None) -> bool:
+    """Meaning-only 911-hold release. No phrase list. False if the model is down."""
+    if client is None:
+        client = _client()
+    if client is None:
+        return False
+    messages = [
+        {"role": "system", "content": CONFIRM_SAFE_PROMPT},
+        {"role": "user", "content": user_text or ""},
+    ]
+    try:
+        raw = _complete(client, messages, use_json_mode=True)
+        return _parse_safety_confirmed(raw)
+    except Exception:  # noqa: BLE001 — stay held if confirmation JSON is unusable
+        try:
+            raw = _complete(client, messages, use_json_mode=False)
+            return _parse_safety_confirmed(raw)
+        except Exception:  # noqa: BLE001
+            return False
+
+
 def analyze(
     history: list[ChatMessage],
     intake_guidance: str | None = None,
+    safety_hold: bool = False,
 ) -> tuple[LLMAnalysis, bool]:
     """Return (analysis, used_fallback).
 
@@ -309,7 +498,13 @@ def analyze(
     if client is None:
         return fallback_analysis(last_user, history), True
 
+    # Hold-release is a separate meaning call so chat history about the fire/gas/CO
+    # cannot keep safety_confirmed false while they are telling us they got out.
+    confirmed = confirm_household_safe(last_user, client=client) if safety_hold else False
+
     api_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    if safety_hold:
+        api_messages.append({"role": "system", "content": SAFETY_HOLD_TURN})
     if intake_guidance:
         api_messages.append({"role": "system", "content": intake_guidance})
     for message in history:
@@ -318,7 +513,9 @@ def analyze(
 
     last_error = None
     use_json_mode = True
-    for attempt in range(2):
+    # Gemini often echoes a catalog label, then omits category_confidence.
+    # Two corrections are enough; then keyword fallback.
+    for attempt in range(3):
         try:
             if attempt == 1 and last_error:
                 api_messages = api_messages + [{
@@ -329,14 +526,22 @@ def analyze(
                     ),
                 }]
             raw = _complete(client, api_messages, use_json_mode=use_json_mode)
-            return parse_analysis(raw), False
+            analysis = parse_analysis(raw)
+            _apply_clarification(analysis, last_user, client)
+            if confirmed:
+                analysis.safety_confirmed = True
+            return analysis, False
         except Exception as exc:  # noqa: BLE001 — we intentionally fall back
             last_error = str(exc)
             lowered = last_error.lower()
             if "response_format" in lowered or "json_object" in lowered:
                 use_json_mode = False
 
-    return fallback_analysis(last_user, history), True
+    fallback = fallback_analysis(last_user, history)
+    _apply_clarification(fallback, last_user, client)
+    if confirmed:
+        fallback.safety_confirmed = True
+    return fallback, True
 
 
 def _hazard_labels(hazards: list[Hazard]) -> str:

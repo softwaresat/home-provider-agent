@@ -6,14 +6,15 @@ import re
 
 from app.models import ESCALATE_HAZARDS, CAUTION_HAZARDS, Hazard
 
-# Negation in the 48 characters before a phrase. Used so "not everyone is safe"
-# does not count as safe, and "I no longer smell gas" does not re-trigger gas.
+# Negation in the same clause as a phrase, so "I no longer smell gas" does not
+# re-trigger, but "I don't know, but I smell gas" still does.
 _NEGATION_BEFORE = re.compile(
     r"(?i)\b("
     r"not|no|never|don't|dont|do not|doesn't|doesnt|didn't|didnt|"
     r"isn't|isnt|wasn't|wasnt|without|no longer|can't|cannot"
     r")\b"
 )
+_CLAUSE_SPLIT = re.compile(r"(?:,\s*)?\bbut\b|[.!?;]\s+|\n+", re.IGNORECASE)
 
 # Phrase lists are intentionally conservative: short generic words like "gas" or
 # "smoke" alone are too noisy (gas stove, fireplace smoke, etc.).
@@ -99,21 +100,6 @@ SAFETY_ADVICE: dict[Hazard, str] = {
     ),
 }
 
-SAFE_PHRASES = (
-    "i'm safe",
-    "im safe",
-    "i am safe",
-    "we're safe",
-    "we are safe",
-    "everyone is safe",
-    "false alarm",
-    "no longer smell",
-    "don't smell it anymore",
-    "do not smell it anymore",
-    "it was nothing",
-)
-
-
 def _levenshtein(left: str, right: str) -> int:
     if left == right:
         return 0
@@ -143,6 +129,10 @@ def _token_close(needle: str, hay: str) -> bool:
     return _levenshtein(needle, hay) <= 1
 
 
+def _clauses(text: str) -> list[str]:
+    return [part.strip() for part in _CLAUSE_SPLIT.split(text or "") if part.strip()]
+
+
 def _affirmed_at(text: str, idx: int) -> bool:
     prefix = (text or "").lower()[max(0, idx - 48) : idx]
     return not _NEGATION_BEFORE.search(prefix)
@@ -159,6 +149,9 @@ def _phrase_is_affirmed(text: str, phrase: str) -> bool:
     needle = (phrase or "").lower().strip()
     if not needle:
         return False
+    clauses = _clauses(lowered)
+    if len(clauses) > 1:
+        return any(_phrase_is_affirmed(clause, needle) for clause in clauses)
     start = 0
     while True:
         idx = lowered.find(needle, start)
@@ -196,10 +189,10 @@ def _embedding_affirms_hazard(text: str, phrases: tuple[str, ...]) -> bool:
         return False
     if encoder() is None:
         return False
-    for sentence in _sentences(text):
-        if _NEGATION_BEFORE.search(sentence):
+    for clause in _clauses(text):
+        if _NEGATION_BEFORE.search(clause):
             continue
-        if best_phrase_score(sentence, phrases) >= MIN_COSINE:
+        if best_phrase_score(clause, phrases) >= MIN_COSINE:
             return True
     return False
 
@@ -236,7 +229,3 @@ def advice_for(hazards: list[Hazard]) -> str | None:
     )
     parts = [SAFETY_ADVICE[h] for h in ordered if h in hazards]
     return " ".join(parts) if parts else None
-
-
-def user_says_safe(text: str) -> bool:
-    return any(_phrase_is_affirmed(text, phrase) for phrase in SAFE_PHRASES)

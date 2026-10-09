@@ -153,6 +153,8 @@ export default function LeadPanel({
         <ContactForm
           onSubmit={onContact}
           busy={busy}
+          initialProblem={lead?.problem_summary || ""}
+          consentMissing={lead?.missing_required?.includes("consent_to_share")}
           disabledReason={
             safetyEscalated
               ? "Safety-escalated sessions do not produce a dispatchable lead."

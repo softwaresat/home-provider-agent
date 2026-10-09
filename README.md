@@ -32,12 +32,15 @@ Edit `backend/.env`:
 DEEPSEEK_API_KEY=
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEEPSEEK_MODEL=deepseek-flash
+GEMINI_API_KEY=
+GEMINI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
+GEMINI_MODEL=gemini-3.8-flash
 GOOGLE_PLACES_API_KEY=
 ```
 
 Never put keys in the frontend or commit `.env`.
 
-Without `DEEPSEEK_API_KEY`, the agent still runs using a deterministic keyword classifier. Without `GOOGLE_PLACES_API_KEY` and with an empty fallback fixture, provider search returns no listings (it will **not** invent businesses).
+With `GEMINI_API_KEY` set, intake uses that model (`gemini-3.8-flash` by default). Otherwise it uses DeepSeek. Without either key, the agent still runs using a deterministic keyword classifier. Without `GOOGLE_PLACES_API_KEY` and with an empty fallback fixture, provider search returns no listings (it will **not** invent businesses).
 
 ### 2. Backend
 

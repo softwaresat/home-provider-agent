@@ -101,10 +101,10 @@ def _turn(session: SessionState) -> TurnResponse:
 def health() -> HealthResponse:
     return HealthResponse(
         status="ok",
-        deepseek_configured=config.deepseek_configured(),
+        deepseek_configured=config.llm_configured(),
         google_places_configured=config.places_configured(),
         search_mode=config.search_mode(),
-        model=config.DEEPSEEK_MODEL,
+        model=config.active_model(),
     )
 
 

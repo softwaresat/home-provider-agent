@@ -95,6 +95,7 @@ class LLMAnalysis(BaseModel):
     missing_details: list[str] = Field(default_factory=list)
     next_question: Optional[str] = None
     dispatch_ready: bool = False
+    safety_confirmed: bool = False
 
     @field_validator("service_category", mode="before")
     @classmethod
@@ -146,7 +147,7 @@ class LLMAnalysis(BaseModel):
             out.append(hazard)
         return out
 
-    @field_validator("dispatch_ready", mode="before")
+    @field_validator("dispatch_ready", "safety_confirmed", mode="before")
     @classmethod
     def coerce_dispatch_ready(cls, value):
         if isinstance(value, bool):
@@ -208,6 +209,7 @@ class ContactInfo(BaseModel):
     phone: Optional[str] = None
     email: Optional[str] = None
     service_address: Optional[str] = None
+    problem_summary: Optional[str] = None
     consent_to_share: bool = False
 
     @field_validator("name", mode="before")
@@ -220,7 +222,7 @@ class ContactInfo(BaseModel):
             raise ValueError("name is required")
         return stripped
 
-    @field_validator("phone", "email", "service_address", mode="before")
+    @field_validator("phone", "email", "service_address", "problem_summary", mode="before")
     @classmethod
     def empty_to_none(cls, value):
         if value is None:

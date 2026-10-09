@@ -1,14 +1,25 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
-export default function ContactForm({ onSubmit, busy, disabledReason }) {
+export default function ContactForm({
+  onSubmit,
+  busy,
+  disabledReason,
+  consentMissing,
+  initialProblem = "",
+}) {
   const [form, setForm] = useState({
     name: "",
     phone: "",
     email: "",
     service_address: "",
+    problem_summary: initialProblem || "",
     consent_to_share: false,
   });
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    setForm((current) => ({ ...current, problem_summary: initialProblem || "" }));
+  }, [initialProblem]);
 
   function update(field, value) {
     setForm((current) => ({ ...current, [field]: value }));
@@ -32,11 +43,18 @@ export default function ContactForm({ onSubmit, busy, disabledReason }) {
           setError("Service address is required.");
           return;
         }
+        if (!form.consent_to_share) {
+          setError(
+            "Check the consent box to draft the email. Nothing is sent to the business."
+          );
+          return;
+        }
         onSubmit({
           name: form.name.trim(),
           phone: form.phone.trim() || null,
           email: form.email.trim() || null,
           service_address: form.service_address.trim(),
+          problem_summary: form.problem_summary.trim() || null,
           consent_to_share: form.consent_to_share,
         });
       }}
@@ -44,6 +62,16 @@ export default function ContactForm({ onSubmit, busy, disabledReason }) {
       {disabledReason && (
         <p className="rounded-xl bg-red-50 px-3 py-2 text-xs text-red-900">{disabledReason}</p>
       )}
+      <label className="block text-xs font-semibold text-ink/70">
+        Problem
+        <textarea
+          className="mt-1 w-full rounded-xl border border-emerald-950/10 px-3 py-2 text-sm"
+          rows={3}
+          value={form.problem_summary}
+          placeholder="Leave blank to write this from the chat."
+          onChange={(event) => update("problem_summary", event.target.value)}
+        />
+      </label>
       <label className="block text-xs font-semibold text-ink/70">
         Name
         <input
@@ -78,15 +106,24 @@ export default function ContactForm({ onSubmit, busy, disabledReason }) {
           onChange={(event) => update("service_address", event.target.value)}
         />
       </label>
-      <label className="flex items-start gap-2 text-sm text-ink">
+      <label
+        className={`flex items-start gap-2 rounded-xl px-2 py-2 text-sm text-ink ${
+          consentMissing || error.toLowerCase().includes("consent")
+            ? "bg-amber-50 ring-1 ring-amber-200"
+            : ""
+        }`}
+      >
         <input
           type="checkbox"
           className="mt-1"
           checked={form.consent_to_share}
           onChange={(event) => update("consent_to_share", event.target.checked)}
         />
-        I consent to include my contact details and service address in a draft message to the selected provider.
-        This app will not send the email or share this with anyone unless I do.
+        <span>
+          I consent to include my contact details and service address in a draft message
+          to the selected provider. This app will not send the email or share this with
+          anyone unless I do.
+        </span>
       </label>
       {error && <p className="text-xs text-red-700">{error}</p>}
       <button

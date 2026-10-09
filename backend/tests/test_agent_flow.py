@@ -99,26 +99,48 @@ def test_gas_smell_escalates_without_search(monkeypatch):
     assert session.safety_advice == session.messages[-1].content
 
 
-def _historical_escalate_analyze(hazard: Hazard, category: ServiceCategory):
-    """DeepSeek keeps returning the original escalate label from chat history."""
+def test_dont_know_but_smell_gas_escalates_without_classify(monkeypatch):
+    called = {"analyze": False}
 
-    def fake_analyze(history, **_kwargs):
-        last = next(
-            (message.content.lower() for message in reversed(history) if message.role == "user"),
-            "",
-        )
-        want_search = "find contractors" in last
+    def fake_analyze(_history, **_kwargs):
+        called["analyze"] = True
+        raise AssertionError("gas emergency must not run intake analysis")
+
+    monkeypatch.setattr("app.llm.analyze", fake_analyze)
+    monkeypatch.setattr(
+        "app.llm.safety_reply",
+        lambda *_a, **_k: ("Get out and call 911.", False),
+    )
+    session = agent.create_session("gas-idk")
+    agent.handle_user_message(
+        session,
+        "I don't know what's happening, but I smell gas near my kitchen stove right now.",
+    )
+    assert session.stage == Stage.safety_escalated
+    assert called["analyze"] is False
+    assert session.analysis is None
+
+
+def _historical_escalate_analyze(hazard: Hazard, category: ServiceCategory):
+    """Model still labels the original hazard; the test injects this-turn flags."""
+
+    state = {"safety_confirmed": False, "dispatch_ready": False}
+
+    def fake_analyze(_history, **_kwargs):
+        ready = state["dispatch_ready"]
         return _analysis(
             service_category=category,
             category_confidence=0.93,
             hazards=[hazard],
             problem_summary="Emergency reported earlier in the chat.",
             facts={"hazard": hazard.value},
-            missing_details=[] if want_search else ["dispatch details"],
-            next_question=None if want_search else "What else should dispatch know?",
-            dispatch_ready=want_search,
+            missing_details=[] if ready else ["dispatch details"],
+            next_question=None if ready else "What else should dispatch know?",
+            dispatch_ready=ready,
+            safety_confirmed=state["safety_confirmed"],
         ), False
 
+    fake_analyze.state = state
     return fake_analyze
 
 
@@ -142,14 +164,12 @@ def _stub_escalate_copy(monkeypatch, modes: list[str]) -> None:
 
 
 def test_gas_safe_confirmation_does_not_reloop_when_llm_repeats_hazard(monkeypatch):
-    """Escalate on gas; 'I am safe' resumes; contractors search is not a 911 hold."""
+    """Escalate on gas; model flag resumes; contractors search is not a 911 hold."""
     modes: list[str] = []
     _stub_escalate_copy(monkeypatch, modes)
     _stub_places(monkeypatch)
-    monkeypatch.setattr(
-        "app.llm.analyze",
-        _historical_escalate_analyze(Hazard.gas_leak, ServiceCategory.plumbing),
-    )
+    analyze_fn = _historical_escalate_analyze(Hazard.gas_leak, ServiceCategory.plumbing)
+    monkeypatch.setattr("app.llm.analyze", analyze_fn)
 
     session = agent.create_session("gas-safe-loop")
     agent.handle_location(session, "Austin, TX 78704")
@@ -163,6 +183,7 @@ def test_gas_safe_confirmation_does_not_reloop_when_llm_repeats_hazard(monkeypat
     assert "911" in escalate_copy
     assert "will not look up contractors until you confirm" in escalate_copy.lower()
 
+    analyze_fn.state["safety_confirmed"] = True
     agent.handle_user_message(session, "I am safe")
     assert session.safety_cleared is True
     assert session.stage != Stage.safety_escalated
@@ -175,6 +196,7 @@ def test_gas_safe_confirmation_does_not_reloop_when_llm_repeats_hazard(monkeypat
     assert "resume" in modes
     assert session.providers == []
 
+    analyze_fn.state["dispatch_ready"] = True
     agent.handle_user_message(session, "I am safe, please find contractors")
     assert session.safety_cleared is True
     assert session.stage != Stage.safety_escalated
@@ -194,10 +216,10 @@ def test_co_safe_confirmation_does_not_reloop_when_llm_repeats_hazard(monkeypatc
         monkeypatch,
         _listing(name="Stub HVAC", primary_type="hvac_contractor"),
     )
-    monkeypatch.setattr(
-        "app.llm.analyze",
-        _historical_escalate_analyze(Hazard.carbon_monoxide, ServiceCategory.hvac),
+    analyze_fn = _historical_escalate_analyze(
+        Hazard.carbon_monoxide, ServiceCategory.hvac
     )
+    monkeypatch.setattr("app.llm.analyze", analyze_fn)
 
     session = agent.create_session("co-safe-loop")
     agent.handle_location(session, "Austin, TX 78704")
@@ -206,17 +228,57 @@ def test_co_safe_confirmation_does_not_reloop_when_llm_repeats_hazard(monkeypatc
     assert Hazard.carbon_monoxide in session.hazards
     assert "911" in session.messages[-1].content
 
+    analyze_fn.state["safety_confirmed"] = True
     agent.handle_user_message(session, "I am safe")
     assert session.safety_cleared is True
     assert session.stage != Stage.safety_escalated
     assert "will not look up contractors until you confirm" not in session.messages[-1].content.lower()
 
+    analyze_fn.state["dispatch_ready"] = True
     agent.handle_user_message(session, "I am safe, please find contractors")
     assert session.stage != Stage.safety_escalated
     assert session.safety_cleared is True
     assert session.stage == Stage.showing_providers
     assert session.providers
     assert modes.count("escalate") == 1
+
+
+def test_hold_release_follows_model_flag_not_user_wording(monkeypatch):
+    """Python releases only when this-turn analysis.safety_confirmed is true."""
+    modes: list[str] = []
+    _stub_escalate_copy(monkeypatch, modes)
+    _stub_places(
+        monkeypatch,
+        _listing(name="Stub Restoration", primary_type="fire_damage_restorationist"),
+    )
+    analyze_fn = _historical_escalate_analyze(
+        Hazard.fire_smoke, ServiceCategory.handyman
+    )
+    monkeypatch.setattr("app.llm.analyze", analyze_fn)
+
+    session = agent.create_session("fire-flag")
+    agent.handle_location(session, "Austin, TX 78704")
+    agent.handle_user_message(session, "there's a fire in my house")
+    assert session.stage == Stage.safety_escalated
+    assert Hazard.fire_smoke in session.hazards
+
+    agent.handle_user_message(session, "I am safe")
+    assert session.safety_cleared is False
+    assert session.stage == Stage.safety_escalated
+    assert modes.count("escalate") == 2
+
+    analyze_fn.state["safety_confirmed"] = True
+    agent.handle_user_message(session, "Everything is good please continue")
+    assert session.safety_cleared is True
+    assert session.stage != Stage.safety_escalated
+    assert "will not look up contractors until you confirm" not in session.messages[-1].content.lower()
+    assert modes.count("escalate") == 2
+
+    analyze_fn.state["dispatch_ready"] = True
+    agent.handle_user_message(session, "Every person and pet is out and accounted for")
+    assert session.stage == Stage.showing_providers
+    assert session.providers
+    assert modes.count("escalate") == 2
 
 
 def test_happy_path_completes_lead_with_stubbed_places(monkeypatch):
@@ -514,7 +576,10 @@ def test_analyze_receives_catalog_hints_after_trade_is_known(monkeypatch):
     session = agent.create_session("catalog-hint")
     agent.handle_location(session, "Austin, TX 78704")
     agent.handle_user_message(session, "A pipe is leaking in the house.")
-    assert captured["guidance"][0] is None
+    first = captured["guidance"][0]
+    assert first
+    assert "Optional job catalog" in first
+    assert "leaking pipe or fixture" in first
     agent.handle_user_message(session, "It is still dripping under the sink.")
     second = captured["guidance"][1]
     assert second
@@ -539,7 +604,9 @@ def test_analyze_gets_no_catalog_hints_for_uncovered_problem(monkeypatch):
         session,
         "My smart lock randomly unlocks at 2am and the keypad is dead.",
     )
-    assert captured["guidance"] is None
+    assert captured["guidance"]
+    assert "Optional job catalog" in captured["guidance"]
+    assert "unusual" in captured["guidance"].lower() or "nothing fits" in captured["guidance"].lower()
 
 
 def test_unknown_answer_does_not_pivot_to_catalog_fallback(monkeypatch):
@@ -904,6 +971,38 @@ def test_discolored_water_stops_before_diagnostic_extras(monkeypatch):
     assert "neighbor" not in chat
     assert session.analysis.facts["scope"] == "every faucet, hot and cold"
     assert session.analysis.facts["started"] == "today"
+
+
+def test_unknown_trade_does_not_search_as_handyman(monkeypatch):
+    called = {"search": False}
+
+    def fake_search(*_args, **_kwargs):
+        called["search"] = True
+        return [], "google_places", None
+
+    monkeypatch.setattr("app.places.search_text", fake_search)
+    monkeypatch.setattr(
+        "app.llm.analyze",
+        lambda *_args, **_kwargs: (
+            _analysis(
+                service_category=ServiceCategory.unknown,
+                category_confidence=0.2,
+                problem_summary="Not a home repair.",
+                facts={},
+                missing_details=["trade"],
+                next_question=None,
+                dispatch_ready=False,
+            ),
+            False,
+        ),
+    )
+    session = agent.create_session("not-a-trade")
+    agent.handle_location(session, "Austin, TX 78704")
+    agent.handle_user_message(session, "What's the weather tomorrow?")
+    assert called["search"] is False
+    assert session.providers == []
+    assert session.category_override is None
+    assert session.stage != Stage.showing_providers
 
 
 def test_header_location_does_not_abort_gathering(monkeypatch):

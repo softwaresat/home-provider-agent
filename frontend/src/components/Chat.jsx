@@ -36,7 +36,7 @@ export default function Chat({
         <span className="rounded-full bg-white/80 px-3 py-1 text-xs font-semibold tracking-wide text-moss-dark ring-1 ring-emerald-900/10">
           {STAGE_LABEL[stage] || stage}
         </span>
-        {analysis?.service_category && analysis.service_category !== "unknown" && (
+        {stage !== "safety_escalated" && analysis?.service_category && analysis.service_category !== "unknown" && (
           <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs text-emerald-900 ring-1 ring-emerald-200">
             {analysis.service_category.replaceAll("_", " ")}
             {typeof analysis.category_confidence === "number"
@@ -44,7 +44,7 @@ export default function Chat({
               : ""}
           </span>
         )}
-        {analysis?.urgency && (
+        {stage !== "safety_escalated" && analysis?.urgency && (
           <span className="rounded-full bg-amber-50 px-3 py-1 text-xs text-amber-900 ring-1 ring-amber-200">
             {analysis.urgency.replaceAll("_", " ")}
           </span>

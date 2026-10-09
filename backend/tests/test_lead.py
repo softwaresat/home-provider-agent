@@ -1,4 +1,4 @@
-from app.lead import build_lead, draft_email
+from app.lead import apply_lead, build_lead, draft_email
 from app.models import (
     ChatMessage,
     ContactInfo,
@@ -50,6 +50,102 @@ def _session(**kwargs) -> SessionState:
     )
     data.update(kwargs)
     return SessionState(**data)
+
+
+def test_blank_summary_is_taken_from_the_chat_when_the_lead_is_built(monkeypatch):
+    def fake_draft(history, problem_summary="", facts=None):
+        assert any(message.role == "user" for message in history)
+        if problem_summary:
+            return problem_summary, False
+        return (
+            "Water is leaking in the house. I do not know where it is coming from, and I am in a hurry.",
+            False,
+        )
+
+    monkeypatch.setattr("app.llm.draft_problem_paragraph", fake_draft)
+    session = _session(
+        messages=[
+            ChatMessage(role="user", content="There is a plumbing leak and I do not know where."),
+            ChatMessage(role="user", content="I meant hurry."),
+            ChatMessage(role="user", content="I'm not sure"),
+        ],
+        analysis=LLMAnalysis(
+            service_category=ServiceCategory.plumbing,
+            category_confidence=0.85,
+            urgency=Urgency.flexible,
+            problem_summary="",
+            city="Austin",
+            zip_code="78704",
+        ),
+        contact=None,
+    )
+    apply_lead(
+        session,
+        ContactInfo(
+            name="Alex Rivera",
+            phone="512-555-0101",
+            service_address="1200 Barton Springs Rd",
+            consent_to_share=True,
+        ),
+    )
+    assert session.lead is not None
+    assert session.lead.status == LeadStatus.complete
+    assert "leaking" in session.lead.problem_summary.lower()
+    assert session.email is not None
+    assert "leaking" in session.email.body.lower()
+
+
+def test_selected_provider_fills_a_blank_summary_without_a_new_contact(monkeypatch):
+    monkeypatch.setattr(
+        "app.llm.draft_problem_paragraph",
+        lambda *_a, **_k: ("Water is leaking through the house and I do not know the source.", False),
+    )
+    session = _session(
+        messages=[ChatMessage(role="user", content="There is a leak and I do not know where.")],
+        analysis=LLMAnalysis(
+            service_category=ServiceCategory.plumbing,
+            category_confidence=0.85,
+            problem_summary="",
+            city="Austin",
+            zip_code="78704",
+        ),
+    )
+    apply_lead(session)
+    assert session.lead is not None
+    assert "leaking" in session.lead.problem_summary.lower()
+    assert session.lead.status == LeadStatus.complete
+
+
+def test_typed_problem_replaces_a_blank_summary(monkeypatch):
+    def fake_draft(_history, problem_summary="", facts=None):
+        assert problem_summary == "The kitchen sink has been leaking under the cabinet."
+        return problem_summary, False
+
+    monkeypatch.setattr("app.llm.draft_problem_paragraph", fake_draft)
+    session = _session(
+        analysis=LLMAnalysis(
+            service_category=ServiceCategory.plumbing,
+            category_confidence=0.85,
+            problem_summary="",
+            city="Austin",
+            zip_code="78704",
+        ),
+        contact=None,
+        messages=[ChatMessage(role="user", content="The sink is leaking.")],
+    )
+    apply_lead(
+        session,
+        ContactInfo(
+            name="Alex Rivera",
+            phone="512-555-0101",
+            service_address="1200 Barton Springs Rd",
+            consent_to_share=True,
+            problem_summary="The kitchen sink has been leaking under the cabinet.",
+        ),
+    )
+    assert session.lead is not None
+    assert session.lead.problem_summary == "The kitchen sink has been leaking under the cabinet."
+    assert session.email is not None
 
 
 def test_complete_lead_and_email_draft(monkeypatch):

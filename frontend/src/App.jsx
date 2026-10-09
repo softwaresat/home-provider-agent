@@ -185,7 +185,7 @@ export default function App() {
           </button>
           <div className="rounded-2xl bg-white/80 px-4 py-2 text-xs text-ink/70 ring-1 ring-emerald-950/10">
             <div>Model: {health?.model || "…"}</div>
-            <div>DeepSeek: {health?.deepseek_configured ? "configured" : "missing key"}</div>
+            <div>LLM: {health?.deepseek_configured ? "configured" : "missing key"}</div>
             <div>Places: {health?.search_mode || "…"}</div>
           </div>
         </div>

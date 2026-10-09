@@ -35,7 +35,7 @@ def test_valid_json_parses():
 def test_fenced_json_and_invalid_enums_are_coerced():
     raw = """```json
     {
-      "service_category": "wizardry",
+      "service_category": "hvac",
       "category_confidence": 9,
       "urgency": "super-urgent",
       "hazards": ["ghosts", "electrical"],
@@ -44,17 +44,107 @@ def test_fenced_json_and_invalid_enums_are_coerced():
     }
     ```"""
     analysis = parse_analysis(raw)
-    assert analysis.service_category == ServiceCategory.unknown
+    assert analysis.service_category == ServiceCategory.hvac
     assert analysis.category_confidence == 1.0
     assert analysis.urgency == Urgency.flexible
     assert [h.value for h in analysis.hazards] == ["electrical"]
     assert analysis.facts == {}
 
 
+def test_catalog_label_is_not_a_category():
+    try:
+        parse_analysis(
+            '{"service_category":"plumbing: leaking pipe or fixture",'
+            '"category_confidence":0.8,"next_question":"Where?","dispatch_ready":false}'
+        )
+        assert False, "expected category error"
+    except ValueError as exc:
+        assert "service_category" in str(exc)
+
+
 def test_partial_object_uses_defaults():
-    analysis = parse_analysis('{"service_category": "hvac"}')
+    analysis = parse_analysis(
+        '{"service_category": "hvac", "category_confidence": 0.4}'
+    )
     assert analysis.service_category == ServiceCategory.hvac
     assert analysis.facts == {}
+    assert analysis.next_question is None
+    assert analysis.safety_confirmed is False
+
+
+def test_unknown_category_cannot_skip_the_question():
+    try:
+        parse_analysis(
+            '{"service_category":"unknown","category_confidence":0.2,'
+            '"dispatch_ready":true,"next_question":null}'
+        )
+        assert False, "expected unknown to require a question"
+    except ValueError as exc:
+        assert "unknown" in str(exc).lower()
+
+
+def test_safety_confirmed_parses_from_json():
+    assert parse_analysis('{"safety_confirmed": true}').safety_confirmed is True
+    assert parse_analysis('{"safety_confirmed": "yes"}').safety_confirmed is True
+    assert parse_analysis('{"safety_confirmed": false}').safety_confirmed is False
+
+
+def test_off_schema_json_raises():
+    try:
+        parse_analysis(
+            '{"trade":"plumbing","follow_up_questions":["Where is it leaking?"]}'
+        )
+        assert False, "expected schema error"
+    except ValueError as exc:
+        assert "intake schema" in str(exc)
+
+
+def test_unreadable_stretch_blocks_dispatch_even_if_intake_says_ready(monkeypatch):
+    monkeypatch.setattr("app.llm._client", lambda **_k: object())
+
+    def fake_complete(_client, messages, **_k):
+        system = messages[0]["content"]
+        if system.startswith("Read ONLY the latest"):
+            return '{"needs_clarification": true, "question": "What did that first part mean?"}'
+        return (
+            '{"service_category":"plumbing","category_confidence":0.9,'
+            '"urgency":"same_day","urgency_reason":"Active leak",'
+            '"problem_summary":"Leaks in the house.",'
+            '"facts":{},"hazards":[],"missing_details":[],'
+            '"next_question":null,"dispatch_ready":true}'
+        )
+
+    monkeypatch.setattr("app.llm._complete", fake_complete)
+    analysis, used_fallback = analyze(
+        [ChatMessage(role="user", content="The first words are not readable and the sink leaks.")]
+    )
+    assert used_fallback is False
+    assert analysis.dispatch_ready is False
+    assert analysis.next_question == "What did that first part mean?"
+    assert analysis.service_category == ServiceCategory.plumbing
+
+
+def test_readable_message_keeps_dispatch(monkeypatch):
+    monkeypatch.setattr("app.llm._client", lambda **_k: object())
+
+    def fake_complete(_client, messages, **_k):
+        system = messages[0]["content"]
+        if system.startswith("Read ONLY the latest"):
+            return '{"needs_clarification": false, "question": null}'
+        return (
+            '{"service_category":"plumbing","category_confidence":0.9,'
+            '"urgency":"same_day","urgency_reason":"Active leak",'
+            '"problem_summary":"My kitchen sink is leaking.",'
+            '"facts":{},"hazards":[],"missing_details":[],'
+            '"next_question":null,"dispatch_ready":true}'
+        )
+
+    monkeypatch.setattr("app.llm._complete", fake_complete)
+    analysis, used_fallback = analyze(
+        [ChatMessage(role="user", content="My kitchen sink is leaking under the cabinet.")]
+    )
+    assert used_fallback is False
+    assert analysis.dispatch_ready is True
     assert analysis.next_question is None
 
 
@@ -64,6 +154,43 @@ def test_malformed_json_raises():
         assert False, "expected json error"
     except Exception:
         pass
+
+
+def test_safety_hold_confirmation_is_separate_from_intake_json(monkeypatch):
+    """Fire/gas/CO history must not keep the hold if this turn means they got out."""
+    monkeypatch.setattr("app.llm._client", lambda **_k: object())
+    seen = {"confirm": 0, "analyze": 0}
+
+    def fake_complete(_client, messages, **_k):
+        system = messages[0]["content"]
+        if system.startswith("The intake session is paused"):
+            seen["confirm"] += 1
+            assert messages[-1]["role"] == "user"
+            return '{"safety_confirmed": true}'
+        seen["analyze"] += 1
+        return (
+            '{"service_category":"handyman","category_confidence":0.9,'
+            '"urgency":"emergency","urgency_reason":"Fire reported",'
+            '"problem_summary":"There was a fire.","facts":{},'
+            '"hazards":["fire_smoke"],"missing_details":[],'
+            '"next_question":null,"dispatch_ready":false,'
+            '"safety_confirmed":false}'
+        )
+
+    monkeypatch.setattr("app.llm._complete", fake_complete)
+    analysis, used_fallback = analyze(
+        [
+            ChatMessage(role="user", content="there's a fire in my house"),
+            ChatMessage(role="assistant", content="Get out and call 911."),
+            ChatMessage(role="user", content="Everyone is outside and safe"),
+        ],
+        safety_hold=True,
+    )
+    assert used_fallback is False
+    assert seen["confirm"] >= 1
+    assert seen["analyze"] >= 1
+    assert analysis.safety_confirmed is True
+    assert analysis.service_category == ServiceCategory.handyman
 
 
 def test_common_leak_still_calls_deepseek(monkeypatch):
@@ -87,6 +214,16 @@ def test_common_leak_still_calls_deepseek(monkeypatch):
     assert used_fallback is False
     assert called["n"] >= 1
     assert analysis.service_category == ServiceCategory.plumbing
+    assert analysis.next_question
+
+
+def test_keyword_fallback_does_not_search_just_because_the_message_is_long():
+    analysis = fallback_analysis(
+        "I have an issue with plumbing in my house and everything keeps leaking "
+        "and I do not know what to do about it right now."
+    )
+    assert analysis.service_category == ServiceCategory.plumbing
+    assert analysis.dispatch_ready is False
     assert analysis.next_question
 
 

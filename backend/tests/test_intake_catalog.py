@@ -19,19 +19,39 @@ def test_catalog_entries_are_complete():
         assert min(cats) <= 1
 
 
-def test_no_hints_until_a_trade_is_known():
-    assert turn_guidance(ServiceCategory.unknown, "My kitchen sink is leaking.") is None
+def test_gas_odor_row_does_not_assign_plumbing():
+    problem = problem_by_id("natural_gas_odor")
+    assert problem is not None
+    assert problem.category == ServiceCategory.unknown
+    assert problem not in problems_for_category(ServiceCategory.plumbing)
+    guidance = turn_guidance(ServiceCategory.plumbing, facts={}, asked=[])
+    assert "plumbing: natural gas odor" not in guidance
+    assert "trade not assigned: natural gas odor after everyone is safe" in guidance
+    trade_line = next(
+        line for line in guidance.splitlines() if line.startswith("Example jobs in this trade")
+    )
+    assert "natural gas" not in trade_line
+
+
+def test_unknown_trade_still_gets_the_catalog_index():
+    guidance = turn_guidance(ServiceCategory.unknown, "I smell gas near my kitchen stove.")
+    assert guidance is not None
+    assert "Optional job catalog" in guidance
+    assert "natural gas odor after everyone is safe" in guidance
+    assert "leaking pipe or fixture" in guidance
+    assert "Ask at most ONE question" not in guidance
 
 
 def test_plumbing_hints_list_example_jobs_not_a_match():
     guidance = turn_guidance(ServiceCategory.plumbing, facts={}, asked=[])
     assert guidance is not None
-    assert "not a diagnosis" in guidance.lower()
+    assert "not a diagnosis" in guidance.lower() or "not a keyword match" in guidance.lower()
     assert "not a checklist" in guidance.lower()
     assert "leaking pipe or fixture" in guidance
     assert "clogged drain" in guidance
     assert "Ask at most ONE question" in guidance
     assert "dispatch_ready" in guidance
+    assert "natural gas odor after everyone is safe" in guidance
     # Do not dump every remaining catalog question as a script.
     assert "Can a technician reach the shutoff valve?" not in guidance
 

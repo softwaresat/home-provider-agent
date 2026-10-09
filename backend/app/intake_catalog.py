@@ -1,9 +1,9 @@
-"""Optional follow-up hints for a trade the LLM already chose.
+"""Job catalog the LLM can read when choosing a trade and follow-ups.
 
 Python does not keyword-match or embed the homeowner's words against this
-file. After DeepSeek (or the keyword fallback) returns a service category,
-we inject example jobs and their questions for that trade. The model still
-writes the question and decides what is already answered.
+file. Rare or ambiguous jobs belong here as a row (label + description +
+examples). The model uses the catalog alongside the chat; it still writes
+JSON and decides what is already answered.
 """
 
 from __future__ import annotations
@@ -61,8 +61,8 @@ PROBLEMS: tuple[ProblemType, ...] = (
         label="leaking pipe or fixture",
         description=(
             "Water is dripping or spraying from a faucet, sink, shower valve, "
-            "or visible pipe. A plumber needs the fixture, whether it is still "
-            "running, and whether a shutoff is reachable."
+            "or visible pipe. A plumber needs the fixture and whether it is still "
+            "running."
         ),
         examples=(
             "kitchen sink leaking under the cabinet",
@@ -230,7 +230,7 @@ PROBLEMS: tuple[ProblemType, ...] = (
         label="frozen or burst pipe",
         description=(
             "A pipe froze, split, or is spraying after a freeze. Dispatch needs "
-            "whether water is still flowing and whether a main shutoff was used."
+            "whether water is still flowing and where the pipe is."
         ),
         examples=(
             "a pipe burst in the crawlspace after the freeze",
@@ -802,6 +802,111 @@ PROBLEMS: tuple[ProblemType, ...] = (
         ),
     ),
     ProblemType(
+        id="natural_gas_odor",
+        category=ServiceCategory.unknown,
+        label="natural gas odor after everyone is safe",
+        description=(
+            "Gas odor in the home. The emergency hold is decided elsewhere. "
+            "This row does not assign a trade."
+        ),
+        examples=(
+            "there is a gas odor in the house",
+            "rotten egg smell indoors",
+            "gas odor in one room",
+            "gas smell after leaving the home",
+        ),
+        match_keywords=("smell gas", "gas odor", "smells like gas", "rotten egg"),
+        questions=(
+            _q(
+                "source",
+                "source",
+                "Where is the odor coming from?",
+                PRIORITY_DISPATCH,
+            ),
+            _q(
+                "still_present",
+                "still_present",
+                "Is the odor still present?",
+                PRIORITY_DISPATCH,
+            ),
+        ),
+    ),
+    ProblemType(
+        id="fire_after_hold",
+        category=ServiceCategory.unknown,
+        label="fire after the emergency hold",
+        description=(
+            "A fire was reported. The emergency hold is decided elsewhere. "
+            "This row does not assign a trade. The useful question is what "
+            "contractor work they need now."
+        ),
+        examples=(
+            "there was a fire in the house and everyone got out",
+            "the kitchen fire is out and they need help with the damage",
+        ),
+        match_keywords=(),
+        questions=(
+            _q("contractor_work", "contractor_work", "What contractor work is needed now?", PRIORITY_DISPATCH),
+            _q("what_damage", "damage", "What damage is left?", PRIORITY_DISPATCH),
+        ),
+    ),
+    ProblemType(
+        id="co_after_hold",
+        category=ServiceCategory.unknown,
+        label="carbon monoxide alarm after the emergency hold",
+        description=(
+            "A carbon monoxide alarm sounded. The emergency hold is decided "
+            "elsewhere. This row does not assign a trade. The useful question "
+            "is what they need a contractor to look at."
+        ),
+        examples=(
+            "the carbon monoxide alarm went off and everyone left",
+            "the hallway carbon monoxide alarm sounded",
+        ),
+        match_keywords=(),
+        questions=(
+            _q("what_to_check", "contractor_work", "What should a contractor look at?", PRIORITY_DISPATCH),
+            _q("which_alarm", "location", "Which alarm sounded?", PRIORITY_DISPATCH),
+        ),
+    ),
+    ProblemType(
+        id="not_a_home_repair",
+        category=ServiceCategory.unknown,
+        label="not a home repair",
+        description=(
+            "The request is not work on a home. Leave the trade unassigned. "
+            "This is not a handyman job."
+        ),
+        examples=(
+            "a question about tomorrow's weather",
+            "a vehicle that will not start",
+            "a request that has nothing to do with the home",
+        ),
+        match_keywords=(),
+        questions=(
+            _q("home_problem", "home_problem", "Is there a home repair to take care of?", PRIORITY_DISPATCH),
+            _q("which_part", "which_part", "Which part of the home needs work?", PRIORITY_DISPATCH),
+        ),
+    ),
+    ProblemType(
+        id="pool_pump",
+        category=ServiceCategory.handyman,
+        label="pool pump not circulating",
+        description=(
+            "A pool pump hums, is dead, or is not moving water. Use handyman "
+            "when that is the closest trade. The symptom is enough to dispatch."
+        ),
+        examples=(
+            "the pool pump hums but does not move water",
+            "the pool is not circulating",
+        ),
+        match_keywords=(),
+        questions=(
+            _q("symptom", "symptom", "Does the pump hum, or is it completely dead?", PRIORITY_DISPATCH),
+            _q("water_moving", "moving_water", "Is it moving any water?", PRIORITY_DISPATCH),
+        ),
+    ),
+    ProblemType(
         id="garage_door",
         category=ServiceCategory.handyman,
         label="garage door or opener",
@@ -935,43 +1040,64 @@ def unanswered_questions(
     return remaining
 
 
+def catalog_index() -> str:
+    """Every job row, so the model can pick a trade before one is locked in."""
+    lines = [
+        "Optional job catalog. Use it with the chat to pick a trade. Not a keyword "
+        "match, not a diagnosis, not a script. If nothing fits, use unknown.",
+        "Reply with the intake JSON keys already specified, including "
+        "service_category, next_question, and dispatch_ready. Do not invent keys.",
+    ]
+    for problem in PROBLEMS:
+        desc = " ".join(problem.description.split())
+        if problem.category == ServiceCategory.unknown:
+            lines.append(f"- trade not assigned: {problem.label} — {desc}")
+        else:
+            lines.append(f"- {problem.category.value}: {problem.label} — {desc}")
+    return "\n".join(lines)
+
+
 def turn_guidance(
     category: ServiceCategory,
     text: str = "",
     facts: dict[str, str] | None = None,
     asked: list[str] | None = None,
 ) -> str | None:
-    """Compact optional hints for this trade, or None before a category is known.
+    """Catalog index every turn, plus follow-up policy after a trade is known.
 
     `text` is ignored. We do not match the homeowner's wording against the catalog.
     This is not a checklist: do not inject every remaining catalog question.
     """
     del text
-    if category in {ServiceCategory.unknown}:
-        return None
-    pool = problems_for_category(category)
-    if not pool:
-        return None
-    labels = "; ".join(problem.label for problem in pool)
-    asked_n = len(asked or [])
-    return "\n".join(
-        [
-            "Optional intake hints for this turn. Not a checklist, not a script, "
-            "and not a diagnosis.",
-            f"The current trade guess is {category.value}.",
-            f"Example jobs (not a confirmed type): {labels}.",
-            f"Follow-ups already asked: {asked_n}. Ask at most ONE question, and only "
-            "if the answer could change the trade, urgency, or whether a technician "
-            "can do the job.",
-            "Do not exhaust this list. Skip diagnostic extras (pressure, neighbors, "
-            "troubleshooting steps, root cause) once you know the main symptom, "
-            "where or how widespread it is, and roughly when it started.",
-            "Set dispatch_ready true and next_question null as soon as a dispatcher "
-            "could brief a provider. If they do not know an answer, record that slot "
-            "as unknown (not a negative). If a trade can already be briefed, stop; "
-            "otherwise ask a different useful question, never the same slot, never a "
-            "canned leak/clog substitute. If the job is unusual or spans trades, "
-            "ignore these hints.",
-        ]
-    )
+    parts = [catalog_index()]
+    if category not in {ServiceCategory.unknown}:
+        pool = problems_for_category(category)
+        if pool:
+            labels = "; ".join(problem.label for problem in pool)
+            asked_n = len(asked or [])
+            parts.append(
+                "\n".join(
+                    [
+                        "Follow-up hints for the current trade guess "
+                        f"({category.value}). Not a checklist.",
+                        f"Example jobs in this trade: {labels}.",
+                        f"Follow-ups already asked: {asked_n}. Ask at most ONE question, "
+                        "and only if the answer could change the trade, urgency, or "
+                        "whether a technician can do the job.",
+                        "Do not exhaust this list. Skip diagnostic extras (pressure, "
+                        "neighbors, troubleshooting steps, brand, model, shutoff, "
+                        "root cause) once you know the main symptom, where or how "
+                        "widespread it is, and roughly when it started.",
+                        "Set dispatch_ready true and next_question null as soon as a "
+                        "dispatcher could brief a provider. If part of their message "
+                        "could not be understood, ask about that part first; do not "
+                        "treat it as empty. If they do not know an "
+                        "answer, record that slot as unknown (not a negative). If a "
+                        "trade can already be briefed, stop; otherwise ask a different "
+                        "useful question, never the same slot. If the job is unusual "
+                        "or spans trades, ignore these hints.",
+                    ]
+                )
+            )
+    return "\n\n".join(parts)
 

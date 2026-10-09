@@ -127,29 +127,17 @@ def _apply_location(session: SessionState, city: Optional[str], zip_code: Option
         session.location_query = location_label(session)
 
 
-_SHRUG_SUMMARY_RE = re.compile(
-    r"\b(idk|dunno|whatever|"
-    r"(i\s+)?((do\s+not|don'?t)\s+know)|not sure|no idea)\b",
-    re.IGNORECASE,
-)
-_CHATTY_SUMMARY_RE = re.compile(
-    r"\b(idk|lol|yes i am safe|i don't know what happened)\b",
-    re.IGNORECASE,
-)
-
-
 def _prefer_problem_summary(old: str, incoming: str) -> str:
-    """Keep a specific summary when a later turn is a shrug or chat dump."""
+    """Keep a detailed summary when a later model turn returns a stub."""
     old = (old or "").strip()
     incoming = (incoming or "").strip()
     if not incoming:
         return old
     if not old:
         return incoming
+    old_words = len(re.findall(r"[a-z0-9]+", old.lower()))
     incoming_words = len(re.findall(r"[a-z0-9]+", incoming.lower()))
-    if _SHRUG_SUMMARY_RE.search(incoming) and incoming_words <= 12:
-        return old
-    if _CHATTY_SUMMARY_RE.search(incoming) and not _CHATTY_SUMMARY_RE.search(old):
+    if incoming_words <= 4 and incoming_words < old_words:
         return old
     return incoming
 
@@ -415,9 +403,9 @@ def _continue_intake(session: SessionState) -> None:
         lead_mod.apply_lead(session)
         _append_assistant(
             session,
-            "I have a provider selected. Please fill in your name, a phone or email, "
-            "the service address, and the consent checkbox on the Lead tab so I can "
-            "build a dispatchable lead. Nothing will be sent.",
+            "I have a provider selected. On the Lead tab, add your name, a phone or email, "
+            "and the service address, then check the consent box so I can draft the email. "
+            "Nothing is sent to the business.",
         )
         return
 
@@ -450,7 +438,9 @@ def _continue_intake(session: SessionState) -> None:
         return
 
     if effective_category(session) == ServiceCategory.unknown:
-        session.category_override = ServiceCategory.handyman
+        session.stage = Stage.gathering
+        return
+
     if at_cap:
         preface = "I will search with the details collected so far rather than asking more questions."
     elif category_ready(session):
@@ -488,17 +478,20 @@ def handle_user_message(session: SessionState, text: str) -> SessionState:
         facts=session.analysis.facts if session.analysis else None,
         asked=session.asked_questions,
     )
-    analysis, used_fallback = llm.analyze(session.messages, intake_guidance=guidance)
+    analysis, used_fallback = llm.analyze(
+        session.messages,
+        intake_guidance=guidance,
+        safety_hold=prior_stage == Stage.safety_escalated,
+    )
     if used_fallback:
         session.llm_fallback_used = True
 
-    # 911 hold/release is this-turn Python: detect_hazards(text) already held
-    # above. DeepSeek often repeats gas/smoke/CO labels from earlier chat;
-    # those must not un-clear safety or re-send escalate copy.
-    if session.stage == Stage.safety_escalated and safety.user_says_safe(text):
+    # Hold is this-turn detect_hazards. Release is this-turn meaning from
+    # DeepSeek (safety_confirmed), not historical hazard labels.
+    if prior_stage == Stage.safety_escalated and analysis.safety_confirmed:
         session.safety_cleared = True
         session.stage = Stage.gathering
-        _safety_copy(session, text, "resume")
+        _append_assistant(session, _safety_copy(session, text, "resume"))
 
     merged_hazards = {h.value: h for h in (session.hazards + rule_hazards + analysis.hazards)}
     session.hazards = list(merged_hazards.values())
@@ -523,11 +516,15 @@ def handle_user_message(session: SessionState, text: str) -> SessionState:
 
     if prior_stage == Stage.collecting_contact:
         lead_mod.apply_lead(session)
-        _append_assistant(
-            session,
-            "Thanks, I captured that. Please finish the contact form and consent checkbox "
-            "on the Lead tab when you are ready.",
-        )
+        lead = session.lead
+        if lead and lead.missing_required:
+            _append_assistant(session, _incomplete_lead_reply(lead))
+        else:
+            _append_assistant(
+                session,
+                "Use the Lead tab form for name, contact, address, and the consent checkbox. "
+                "I cannot take those from chat. Nothing is sent to the business.",
+            )
         return session
 
     if prior_stage in {Stage.showing_providers, Stage.no_results}:
@@ -556,8 +553,9 @@ def handle_user_message(session: SessionState, text: str) -> SessionState:
 
     if session.stage == Stage.need_location:
         if has_location(session):
-            if not category_ready(session) and effective_category(session) == ServiceCategory.unknown:
-                session.category_override = ServiceCategory.handyman
+            if effective_category(session) == ServiceCategory.unknown:
+                _continue_intake(session)
+                return session
             _maybe_search_and_reply(session, "Thanks — searching with that location.")
             return session
         session.location_question_asked = True
@@ -614,6 +612,52 @@ def handle_search(
     return session
 
 
+_MISSING_LABELS = {
+    "consent_to_share": "your consent to put contact details in a draft email",
+    "selected_provider": "a provider selected from the list",
+    "provider_trade_match": "a provider whose listing matches this trade",
+    "provider_contact": "a provider listing with a phone, website, or Maps link",
+    "customer_name": "your name",
+    "customer_phone_or_email": "a phone number or email",
+    "service_address": "the service address",
+    "city_or_zip": "city or ZIP in the location field",
+    "problem_summary": "a short description of the problem",
+    "service_category": "a service category",
+}
+
+
+def _incomplete_lead_reply(lead) -> str:
+    """Ask for what is actually missing. Do not always demand consent."""
+    missing = list(getattr(lead, "missing_required", None) or [])
+    need_consent = "consent_to_share" in missing
+    other_keys = [key for key in missing if key != "consent_to_share"]
+    others = [_MISSING_LABELS.get(key, key.replace("_", " ")) for key in other_keys]
+    if need_consent and not others:
+        return (
+            "I can draft the email as soon as you check the consent box on the Lead tab. "
+            "That box is how you agree to include your name, contact, and service address "
+            "in the draft. Nothing is sent to the business."
+        )
+    if need_consent:
+        listed = ", ".join(others)
+        return (
+            f"To draft the email I still need {listed}, and your consent. "
+            "Fill those on the Lead tab, check the consent box, then click "
+            "Build lead + draft email. Nothing is sent to the business."
+        )
+    if others:
+        listed = ", ".join(others)
+        return (
+            f"I still need {listed} before I can draft the email. "
+            "Update the Lead tab or pick a matching listing, then try again. "
+            "Nothing is sent to the business."
+        )
+    return (
+        "The lead is still incomplete. Finish the contact form on the Lead tab. "
+        "Nothing is sent to the business."
+    )
+
+
 def handle_select(session: SessionState, place_id: str) -> SessionState:
     if blocked_for_safety(session):
         _append_assistant(
@@ -642,8 +686,9 @@ def handle_select(session: SessionState, place_id: str) -> SessionState:
         session,
         f"Selected {match.name}. {why} "
         "A Google listing is not a booking or a promise they will take the job. "
-        "Next: add your name, a phone or email, the service address, and check consent "
-        "on the Lead tab. I will draft an email but will not send it.",
+        "On the Lead tab, add your name, a phone or email, and the service address, "
+        "then check the consent box. That is the ask: I will not draft the email until "
+        "you consent. Nothing is sent to the business.",
     )
     return session
 
@@ -670,10 +715,5 @@ def handle_contact(session: SessionState, contact: ContactInfo) -> SessionState:
         )
     else:
         session.stage = Stage.collecting_contact
-        missing = ", ".join(lead.missing_required) or "required fields"
-        _append_assistant(
-            session,
-            f"The lead is still incomplete. Missing: {missing}. "
-            "I need explicit consent and a selected provider before it is dispatchable.",
-        )
+        _append_assistant(session, _incomplete_lead_reply(lead))
     return session
