@@ -6,7 +6,11 @@ This is a 10-hour vertical slice, not a production marketplace.
 
 ## Demo
 
-[Screen recording](demo/demo.mp4) (about 3.5 minutes): a basement water lead, an HVAC lead, and a gas-smell chat that starts with a 911 warning and later becomes an appliance-repair draft after the homeowner says the gas is shut off and the leak is in the stove. The ZIP shown is 78705. Nothing is sent.
+https://github.com/softwaresat/home-provider-agent/raw/master/demo/demo.mp4
+
+<video src="https://github.com/softwaresat/home-provider-agent/raw/master/demo/demo.mp4" controls width="100%"></video>
+
+[Watch the screen recording](https://github.com/softwaresat/home-provider-agent/blob/master/demo/demo.mp4) (about 3.5 minutes): a basement water lead, an HVAC lead, and a gas-smell chat that starts with a 911 warning and later becomes an appliance-repair draft after the homeowner says the gas is shut off and the leak is in the stove. The ZIP shown is 78705. Nothing is sent.
 
 ## What it does
 
