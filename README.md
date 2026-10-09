@@ -1,8 +1,8 @@
 # Home-services lead agent
 
-Internship take-home prototype: a homeowner describes a problem, the app gathers just enough detail, looks up **real** local businesses via Google Places, and produces a **dispatchable lead plus a draft email**. Nothing is sent to a provider.
+A homeowner describes a problem, the app gathers just enough detail, looks up **real** local businesses via Google Places, and produces a **dispatchable lead plus a draft email**. Nothing is sent to a provider.
 
-This is a 10-hour vertical slice, not a production marketplace.
+This is a working prototype, not a production marketplace.
 
 ## Demo
 
