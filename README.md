@@ -4,6 +4,10 @@ Internship take-home prototype: a homeowner describes a problem, the app gathers
 
 This is a 10-hour vertical slice, not a production marketplace.
 
+## Demo
+
+[Screen recording](demo/demo.mp4) (about 3.5 minutes): a basement water lead, an HVAC lead, and a gas-smell chat that starts with a 911 warning and later becomes an appliance-repair draft after the homeowner says the gas is shut off and the leak is in the stove. The ZIP shown is 78705. Nothing is sent.
+
 ## What it does
 
 1. Interprets a home problem with DeepSeek (`deepseek-flash`); a keyword classifier runs only if the model is down.
